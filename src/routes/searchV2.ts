@@ -1,0 +1,30 @@
+import { Router, Response } from 'express';
+import { z } from 'zod';
+import { prisma } from '../lib/prisma';
+import { auth, AuthRequest } from '../middleware/auth';
+const router=Router(); const db:any=prisma;
+const ok=(res:Response,data:any,meta?:any)=>res.json({success:true,data,...(meta?{meta}: {})});
+const num=(v:any)=>v===undefined?undefined:Number(v);
+
+router.get('/products',async(req,res)=>{try{
+ const q=String(req.query.q||'').trim(); const page=Math.max(Number(req.query.page)||1,1), limit=Math.min(Math.max(Number(req.query.limit)||24,1),100);
+ const minPrice=num(req.query.minPrice),maxPrice=num(req.query.maxPrice); const sizes=String(req.query.size||'').split(',').filter(Boolean),colors=String(req.query.color||'').split(',').filter(Boolean),brands=String(req.query.brand||'').split(',').filter(Boolean);
+ const where:any={isActive:true,AND:[]};
+ if(q) where.AND.push({OR:[{name:{contains:q,mode:'insensitive'}},{description:{contains:q,mode:'insensitive'}},{metaKeywords:{contains:q,mode:'insensitive'}},{variants:{some:{sku:{contains:q,mode:'insensitive'}}}},{productTags:{some:{tag:{name:{contains:q,mode:'insensitive'}}}}}]});
+ if(req.query.category) where.AND.push({category:{slug:String(req.query.category)}}); if(req.query.subcategory)where.AND.push({subCategory:{slug:String(req.query.subcategory)}});
+ if(brands.length)where.AND.push({brand:{slug:{in:brands}}}); if(req.query.tag)where.AND.push({productTags:{some:{tag:{slug:String(req.query.tag)}}}});
+ const variant:any={isActive:true}; if(sizes.length)variant.size={in:sizes}; if(colors.length)variant.OR=[{color:{in:colors,mode:'insensitive'}},{colorHex:{in:colors}}]; if(minPrice!==undefined||maxPrice!==undefined)variant.price={...(minPrice!==undefined?{gte:minPrice}:{}),...(maxPrice!==undefined?{lte:maxPrice}:{})};
+ if(Object.keys(variant).length>1)where.AND.push({variants:{some:variant}}); if(req.query.inStock==='1')where.AND.push({variants:{some:{isActive:true,OR:[{stockQuantity:{gt:0}},{allowBackorder:true},{preorderEnabled:true}]}}});
+ if(!where.AND.length)delete where.AND;
+ const sort=String(req.query.sort||'newest'); const orderBy:any=sort==='name_asc'?{name:'asc'}:sort==='name_desc'?{name:'desc'}:sort==='oldest'?{createdAt:'asc'}:{createdAt:'desc'};
+ let [items,total]=await Promise.all([db.product.findMany({where,skip:(page-1)*limit,take:limit,orderBy,include:{brand:true,category:true,subCategory:true,images:{take:1,orderBy:{sortOrder:'asc'}},variants:{where:{isActive:true}}}}),db.product.count({where})]);
+ const effective=(p:any)=>Math.min(...p.variants.map((v:any)=>Number(v.discountPrice??v.price)).filter(Number.isFinite)); if(sort==='price_asc'||sort==='price_desc')items=items.sort((a:any,b:any)=>(effective(a)-effective(b))*(sort==='price_desc'?-1:1));
+ return ok(res,items,{page,limit,total,pages:Math.ceil(total/limit),sort});
+}catch(e:any){return res.status(500).json({success:false,message:e.message})}});
+router.get('/autocomplete',async(req,res)=>{try{const q=String(req.query.q||'').trim(); if(q.length<2)return ok(res,[]); const [products,brands,tags]=await Promise.all([db.product.findMany({where:{isActive:true,name:{contains:q,mode:'insensitive'}},select:{id:true,name:true,slug:true,imageUrl:true},take:6}),db.brand.findMany({where:{isActive:true,name:{contains:q,mode:'insensitive'}},select:{name:true,slug:true},take:3}),db.tag.findMany({where:{isActive:true,name:{contains:q,mode:'insensitive'}},select:{name:true,slug:true},take:3})]); return ok(res,{products,brands,tags});}catch(e:any){return res.status(500).json({success:false,message:e.message})}});
+router.get('/suggestions',async(req,res)=>{try{const q=String(req.query.q||'').trim(); const rows=await db.product.findMany({where:{isActive:true,...(q?{name:{contains:q,mode:'insensitive'}}:{})},select:{name:true},orderBy:{updatedAt:'desc'},take:10}); return ok(res,[...new Set(rows.map((x:any)=>x.name))]);}catch(e:any){return res.status(500).json({success:false,message:e.message})}});
+router.get('/filters',async(_req,res)=>{try{const [brands,variants]=await Promise.all([db.brand.findMany({where:{isActive:true},select:{name:true,slug:true}}),db.productVariant.findMany({where:{isActive:true},select:{size:true,color:true,colorHex:true,price:true}})]); const prices=variants.map((v:any)=>Number(v.price)); return ok(res,{brands,sizes:[...new Set(variants.map((v:any)=>v.size).filter(Boolean))],colors:[...new Map(variants.filter((v:any)=>v.color).map((v:any)=>[v.color,{name:v.color,hex:v.colorHex}])).values()],price:{min:prices.length?Math.min(...prices):0,max:prices.length?Math.max(...prices):0}});}catch(e:any){return res.status(500).json({success:false,message:e.message})}});
+router.post('/recent',auth,async(req:AuthRequest,res)=>{try{const query=z.string().min(1).max(200).parse(req.body.query); await db.searchHistory.create({data:{userId:req.user!.userId,query}}); return ok(res,{query});}catch(e:any){return res.status(400).json({success:false,message:e.message})}});
+router.get('/recent',auth,async(req:AuthRequest,res)=>{try{const rows=await db.searchHistory.findMany({where:{userId:req.user!.userId},orderBy:{searchedAt:'desc'},take:30}); const seen=new Set<string>(); return ok(res,rows.filter((r:any)=>!seen.has(r.query.toLowerCase())&&seen.add(r.query.toLowerCase())).slice(0,10));}catch(e:any){return res.status(500).json({success:false,message:e.message})}});
+router.delete('/recent',auth,async(req:AuthRequest,res)=>{await db.searchHistory.deleteMany({where:{userId:req.user!.userId}}); return ok(res,[])});
+export default router;

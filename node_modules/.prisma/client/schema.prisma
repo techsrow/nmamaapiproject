@@ -1,0 +1,1905 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  Customer
+  Admin
+}
+
+enum OrderStatus {
+  Pending
+  Confirmed
+  Processing
+  PartiallyFulfilled
+  Fulfilled
+  Shipped
+  Delivered
+  Cancelled
+  Returned
+}
+
+enum PaymentStatus {
+  Pending
+  Created
+  PartiallyPaid
+  Paid
+  Failed
+  PartiallyRefunded
+  Refunded
+}
+
+enum PaymentProvider {
+  Razorpay
+  COD
+  BankTransfer
+  Manual
+}
+
+enum PaymentMethod {
+  CARD
+  UPI
+  NETBANKING
+  WALLET
+  COD
+  Prepaid
+  BANK_TRANSFER
+}
+
+enum CouponDiscountType {
+  PERCENT
+  FLAT
+}
+
+enum ShippingProvider {
+  Shiprocket
+  Delhivery
+  Manual
+}
+
+enum ShipmentStatus {
+  NotCreated
+  Created
+  Picked
+  InTransit
+  OutForDelivery
+  Delivered
+  RTO
+  Cancelled
+  Failed
+}
+
+enum ReviewStatus {
+  Pending
+  Approved
+  Rejected
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+  PDF
+  OTHER
+}
+
+enum SliderDevice {
+  DESKTOP
+  MOBILE
+}
+
+model User {
+  id                       Int               @id @default(autoincrement())
+  firstName                String
+  lastName                 String
+  email                    String            @unique
+  passwordHash             String?
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+  isActive                 Boolean           @default(true)
+  emailVerified            Boolean           @default(false)
+  emailVerifiedAt          DateTime?
+  emailVerifyToken         String?           @unique
+  emailVerifyTokenExpiry   DateTime?
+  phone                    String?           @unique
+  resetPasswordToken       String?           @unique
+  resetPasswordTokenExpiry DateTime?
+  role                     UserRole          @default(Customer)
+  cartItems                CartItem[]
+  mediaAssets              MediaAsset[]      @relation("UserMediaAssets")
+  orders                   Order[]
+  reviews                  Review[]
+  wishlistItems            WishlistItem[]
+  addresses                CustomerAddress[]
+  recentlyViewed           RecentlyViewed[]
+  searches                 SearchHistory[]
+  returnRequests           ReturnRequest[]
+  supportTickets           SupportTicket[]
+  authIdentities           AuthIdentity[]
+  staffProfile             StaffProfile?
+}
+
+model Product {
+  id                   Int                    @id @default(autoincrement())
+  name                 String
+  description          String?
+  imageUrl             String?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  isActive             Boolean                @default(true)
+  isFeatured           Boolean                @default(false)
+  apContentHtml        String?
+  apContentImageUrl    String?
+  apContentVideoUrl    String?
+  categoryId           Int?
+  productType          String?                @default("simple")
+  shortDescriptionHtml String?
+  subCategoryId        Int?
+  canonicalUrl         String?
+  metaDescription      String?
+  metaKeywords         String?
+  metaTitle            String?
+  ogImageUrl           String?
+  slug                 String                 @unique
+  couponProducts       CouponProduct[]
+  orderItems           OrderItem[]
+  category             Category?              @relation(fields: [categoryId], references: [id])
+  subCategory          SubCategory?           @relation(fields: [subCategoryId], references: [id])
+  colorGroups          ProductColorGroup[]
+  images               ProductImage[]
+  productTags          ProductTag[]
+  variants             ProductVariant[]
+  reviews              Review[]
+  wishlistedBy         WishlistItem[]
+  options              ProductOption[]
+  collections          CollectionProduct[]
+  relatedFrom          RelatedProduct[]       @relation("RelatedFrom")
+  relatedTo            RelatedProduct[]       @relation("RelatedTo")
+  recentlyViewed       RecentlyViewed[]
+  specifications       ProductSpecification[]
+  sizeGuide            SizeGuide?
+  brandId              Int?
+  brand                Brand?                 @relation(fields: [brandId], references: [id])
+  media                ProductMedia[]
+  hsnSac               String?
+  taxClass             String?
+  translations         ProductTranslation[]
+  regionalPrices       RegionalPrice[]
+
+  @@index([categoryId])
+  @@index([subCategoryId])
+  @@index([brandId])
+}
+
+model ProductVariant {
+  id                     Int                   @id @default(autoincrement())
+  productId              Int
+  weight                 String?
+  size                   String?
+  color                  String?
+  colorHex               String?
+  colorImageUrl          String?
+  price                  Decimal               @db.Decimal(18, 2)
+  discountPrice          Decimal?              @db.Decimal(18, 2)
+  stockQuantity          Int
+  sku                    String?               @unique
+  isActive               Boolean               @default(true)
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  lastLowStockNotifiedAt DateTime?
+  lowStockAlertAt        Int                   @default(5)
+  colorGroupId           Int?
+  optionValues           Json? // Shopify-like arbitrary option map, e.g. {"Size":"4Y","Color":"Pink"}
+  barcode                String?
+  compareAtPrice         Decimal?              @db.Decimal(18, 2)
+  costPrice              Decimal?              @db.Decimal(18, 2)
+  trackInventory         Boolean               @default(true)
+  allowBackorder         Boolean               @default(false)
+  preorderEnabled        Boolean               @default(false)
+  cartItems              CartItem[]
+  orderItems             OrderItem[]
+  colorGroup             ProductColorGroup?    @relation(fields: [colorGroupId], references: [id])
+  product                Product               @relation(fields: [productId], references: [id])
+  images                 ProductVariantImage[]
+  guestCartItems         GuestCartItem[]
+
+  @@index([productId])
+}
+
+model CartItem {
+  id        Int            @id @default(autoincrement())
+  userId    Int
+  quantity  Int
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  variantId Int
+  user      User           @relation(fields: [userId], references: [id])
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@unique([userId, variantId])
+  @@index([userId])
+  @@index([variantId])
+}
+
+model Order {
+  id                  Int               @id @default(autoincrement())
+  userId              Int?
+  totalAmount         Decimal           @db.Decimal(18, 2)
+  shippingAddress     String?
+  shippingCity        String?
+  shippingCountry     String?
+  shippingPostalCode  String?
+  guestPhone          String?
+  customerEmail       String?
+  customerName        String?
+  orderDate           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  deliveryDate        DateTime?
+  deliveryTimeSlot    String?
+  currency            String            @default("INR")
+  paidAmount          Decimal?          @db.Decimal(18, 2)
+  razorpayOrderId     String?           @unique
+  awbNumber           String?
+  couponCode          String?
+  couponDiscount      Decimal?          @db.Decimal(18, 2)
+  couponId            Int?
+  deliveredAt         DateTime?
+  shipmentId          String?
+  shipmentStatus      ShipmentStatus    @default(NotCreated)
+  shippedAt           DateTime?
+  shippingFee         Decimal?          @db.Decimal(18, 2)
+  shippingMeta        Json?
+  shippingProvider    ShippingProvider?
+  trackingCode        String?
+  trackingUrl         String?
+  status              OrderStatus       @default(Pending)
+  paymentMethod       PaymentMethod?
+  paymentStatus       PaymentStatus     @default(Pending)
+  orderNotes          String?
+  giftMessage         String?
+  billingAddress      Json?
+  shippingAddressJson Json?
+  deliveryOption      String?
+  expressCheckout     Boolean           @default(false)
+  subtotal            Decimal?          @db.Decimal(18, 2)
+  taxAmount           Decimal?          @db.Decimal(18, 2)
+  discountAmount      Decimal?          @db.Decimal(18, 2)
+  refundedAmount      Decimal           @default(0) @db.Decimal(18, 2)
+  paymentDue          Decimal?          @db.Decimal(18, 2)
+  internalNotes       String?
+  cancellationReason  String?
+  cancelledAt         DateTime?
+  customerGstin       String?
+  invoiceNumber       String?           @unique
+  invoiceIssuedAt     DateTime?
+  taxInclusive        Boolean           @default(true)
+  taxBreakdown        Json?
+  coupon              Coupon?           @relation(fields: [couponId], references: [id])
+  user                User?             @relation(fields: [userId], references: [id])
+  orderItems          OrderItem[]
+  payments            Payment[]
+
+  @@index([userId])
+  @@index([couponId])
+  @@index([shippingProvider])
+  @@index([shipmentStatus])
+}
+
+model Payment {
+  id                Int             @id @default(autoincrement())
+  orderId           Int
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  razorpaySignature String?
+  amount            Decimal         @db.Decimal(18, 2)
+  currency          String          @default("INR")
+  isCaptured        Boolean         @default(false)
+  failureReason     String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  provider          PaymentProvider @default(Razorpay)
+  paymentStatus     PaymentStatus
+  paymentMethod     PaymentMethod?
+  order             Order           @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+model OrderItem {
+  id                Int            @id @default(autoincrement())
+  orderId           Int
+  productId         Int
+  quantity          Int
+  unitPrice         Decimal        @db.Decimal(18, 2)
+  variantId         Int
+  imageUrl          String?
+  productName       String
+  sku               String?
+  variantLabel      String?
+  fulfilledQuantity Int            @default(0)
+  refundedQuantity  Int            @default(0)
+  returnedQuantity  Int            @default(0)
+  order             Order          @relation(fields: [orderId], references: [id])
+  product           Product        @relation(fields: [productId], references: [id])
+  variant           ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@index([orderId])
+  @@index([productId])
+  @@index([variantId])
+}
+
+model Category {
+  id               Int              @id @default(autoincrement())
+  name             String
+  slug             String           @unique
+  isActive         Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  imageUrl         String?
+  couponCategories CouponCategory[]
+  products         Product[]
+  subCategories    SubCategory[]
+}
+
+model SubCategory {
+  id                  Int                 @id @default(autoincrement())
+  categoryId          Int
+  name                String
+  slug                String              @unique
+  isActive            Boolean             @default(true)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  imageUrl            String?
+  couponSubCategories CouponSubCategory[]
+  products            Product[]
+  category            Category            @relation(fields: [categoryId], references: [id])
+
+  @@index([categoryId])
+}
+
+model Tag {
+  id          Int          @id @default(autoincrement())
+  name        String
+  slug        String       @unique
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  productTags ProductTag[]
+}
+
+model ProductTag {
+  productId Int
+  tagId     Int
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [productId], references: [id])
+  tag       Tag      @relation(fields: [tagId], references: [id])
+
+  @@id([productId, tagId])
+  @@index([tagId])
+}
+
+model Coupon {
+  id                  Int                 @id @default(autoincrement())
+  code                String              @unique
+  description         String?
+  isActive            Boolean             @default(true)
+  discountType        CouponDiscountType
+  percentOff          Decimal?            @db.Decimal(5, 2)
+  amountOff           Decimal?            @db.Decimal(18, 2)
+  minOrderAmount      Decimal?            @db.Decimal(18, 2)
+  maxDiscount         Decimal?            @db.Decimal(18, 2)
+  startAt             DateTime?
+  endAt               DateTime?
+  usageLimit          Int?
+  usagePerUser        Int?
+  usedCount           Int                 @default(0)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  couponCategories    CouponCategory[]
+  couponProducts      CouponProduct[]
+  couponSubCategories CouponSubCategory[]
+  orders              Order[]
+}
+
+model CouponProduct {
+  couponId  Int
+  productId Int
+  createdAt DateTime @default(now())
+  coupon    Coupon   @relation(fields: [couponId], references: [id])
+  product   Product  @relation(fields: [productId], references: [id])
+
+  @@id([couponId, productId])
+  @@index([productId])
+}
+
+model CouponCategory {
+  couponId   Int
+  categoryId Int
+  createdAt  DateTime @default(now())
+  category   Category @relation(fields: [categoryId], references: [id])
+  coupon     Coupon   @relation(fields: [couponId], references: [id])
+
+  @@id([couponId, categoryId])
+  @@index([categoryId])
+}
+
+model CouponSubCategory {
+  couponId      Int
+  subCategoryId Int
+  createdAt     DateTime    @default(now())
+  coupon        Coupon      @relation(fields: [couponId], references: [id])
+  subCategory   SubCategory @relation(fields: [subCategoryId], references: [id])
+
+  @@id([couponId, subCategoryId])
+  @@index([subCategoryId])
+}
+
+model ProductImage {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  url       String
+  altText   String?
+  sortOrder Int      @default(0)
+  isMain    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, url])
+  @@index([productId])
+}
+
+model ProductVariantImage {
+  id        Int            @id @default(autoincrement())
+  variantId Int
+  url       String
+  altText   String?
+  sortOrder Int            @default(0)
+  createdAt DateTime       @default(now())
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([variantId, url])
+  @@index([variantId])
+}
+
+model Review {
+  id        Int           @id @default(autoincrement())
+  productId Int
+  userId    Int?
+  rating    Int
+  title     String?
+  comment   String?
+  status    ReviewStatus  @default(Pending)
+  isActive  Boolean       @default(true)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  product   Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user      User?         @relation(fields: [userId], references: [id])
+  images    ReviewImage[]
+
+  @@unique([productId, userId])
+  @@index([productId])
+  @@index([userId])
+  @@index([status])
+}
+
+model ReviewImage {
+  id        Int      @id @default(autoincrement())
+  reviewId  Int
+  url       String
+  publicId  String?
+  altText   String?
+  createdAt DateTime @default(now())
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  @@index([reviewId])
+}
+
+model MediaAsset {
+  id               Int       @id @default(autoincrement())
+  publicId         String    @unique
+  url              String
+  secureUrl        String?
+  type             MediaType
+  format           String?
+  bytes            Int?
+  width            Int?
+  height           Int?
+  folder           String?
+  originalName     String?
+  uploadedByUserId Int?
+  createdAt        DateTime  @default(now())
+  uploadedBy       User?     @relation("UserMediaAssets", fields: [uploadedByUserId], references: [id])
+
+  @@index([type])
+  @@index([folder])
+  @@index([createdAt])
+}
+
+model WishlistItem {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  productId Int
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([userId])
+  @@index([productId])
+}
+
+model HomeSlider {
+  id        String           @id @default(cuid())
+  key       String           @unique @default("home")
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  items     HomeSliderItem[]
+}
+
+model HomeSliderItem {
+  id         String       @id @default(cuid())
+  sliderId   String
+  device     SliderDevice
+  imageUrl   String
+  heading    String?
+  subHeading String?
+  ctaText    String?
+  ctaHref    String?
+  isActive   Boolean      @default(true)
+  sortOrder  Int          @default(0)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  slider     HomeSlider   @relation(fields: [sliderId], references: [id], onDelete: Cascade)
+
+  @@index([sliderId, device, isActive, sortOrder])
+}
+
+model BannerGrid {
+  id              String   @id @default(cuid())
+  banner1ImageUrl String
+  banner1CtaUrl   String
+  banner2ImageUrl String
+  banner2CtaUrl   String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model ProductColorGroup {
+  id        Int                 @id @default(autoincrement())
+  productId Int
+  color     String
+  colorHex  String?
+  createdAt DateTime            @default(now())
+  product   Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  images    ProductColorImage[]
+  variants  ProductVariant[]
+
+  @@unique([productId, color])
+  @@index([productId])
+}
+
+model ProductColorImage {
+  id           Int               @id @default(autoincrement())
+  colorGroupId Int
+  url          String
+  altText      String?
+  sortOrder    Int               @default(0)
+  colorGroup   ProductColorGroup @relation(fields: [colorGroupId], references: [id], onDelete: Cascade)
+
+  @@index([colorGroupId])
+}
+
+// =============================================================
+// COMMERCE V2 — Shopify-style extensibility and requested modules
+// =============================================================
+model ProductOption {
+  id        Int     @id @default(autoincrement())
+  productId Int
+  name      String
+  position  Int     @default(0)
+  values    Json
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, name])
+  @@index([productId, position])
+}
+
+model ProductSpecification {
+  id        Int     @id @default(autoincrement())
+  productId Int
+  name      String
+  value     String
+  position  Int     @default(0)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, position])
+}
+
+model SizeGuide {
+  id        Int     @id @default(autoincrement())
+  productId Int     @unique
+  title     String
+  content   Json
+  imageUrl  String?
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model RelatedProduct {
+  productId        Int
+  relatedProductId Int
+  position         Int     @default(0)
+  product          Product @relation("RelatedFrom", fields: [productId], references: [id], onDelete: Cascade)
+  relatedProduct   Product @relation("RelatedTo", fields: [relatedProductId], references: [id], onDelete: Cascade)
+
+  @@id([productId, relatedProductId])
+}
+
+model Brand {
+  id          Int       @id @default(autoincrement())
+  name        String
+  slug        String    @unique
+  description String?
+  imageUrl    String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  products    Product[]
+}
+
+model ProductMedia {
+  id           Int              @id @default(autoincrement())
+  productId    Int
+  type         ProductMediaType @default(IMAGE)
+  url          String
+  thumbnailUrl String?
+  altText      String?
+  sortOrder    Int              @default(0)
+  isMain       Boolean          @default(false)
+  product      Product          @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt    DateTime         @default(now())
+
+  @@index([productId, sortOrder])
+}
+
+enum ProductMediaType {
+  IMAGE
+  VIDEO
+}
+
+model Collection {
+  id          Int                 @id @default(autoincrement())
+  name        String
+  slug        String              @unique
+  description String?
+  imageUrl    String?
+  type        CollectionType      @default(MANUAL)
+  rules       Json?
+  isFeatured  Boolean             @default(false)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  isActive    Boolean             @default(true)
+  products    CollectionProduct[]
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+}
+
+model CollectionProduct {
+  collectionId Int
+  productId    Int
+  position     Int        @default(0)
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, productId])
+}
+
+enum CollectionType {
+  MANUAL
+  AUTOMATIC
+  SEASONAL
+}
+
+model CustomerAddress {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  label      String?
+  fullName   String
+  phone      String
+  line1      String
+  line2      String?
+  city       String
+  state      String
+  postalCode String
+  country    String   @default("IN")
+  isDefault  Boolean  @default(false)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model RecentlyViewed {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  productId Int
+  viewedAt  DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([userId, viewedAt])
+}
+
+model SearchHistory {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  query      String
+  searchedAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, searchedAt])
+}
+
+model Warehouse {
+  id            Int                  @id @default(autoincrement())
+  name          String
+  code          String               @unique
+  address       Json?
+  isActive      Boolean              @default(true)
+  inventory     WarehouseInventory[]
+  transfersFrom StockTransfer[]      @relation("TransferFrom")
+  transfersTo   StockTransfer[]      @relation("TransferTo")
+}
+
+model WarehouseInventory {
+  warehouseId Int
+  variantId   Int
+  quantity    Int       @default(0)
+  reserved    Int       @default(0)
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@id([warehouseId, variantId])
+  @@index([variantId])
+}
+
+model StockTransfer {
+  id              Int                 @id @default(autoincrement())
+  fromWarehouseId Int
+  toWarehouseId   Int
+  status          StockTransferStatus @default(DRAFT)
+  items           Json
+  notes           String?
+  createdAt       DateTime            @default(now())
+  completedAt     DateTime?
+  fromWarehouse   Warehouse           @relation("TransferFrom", fields: [fromWarehouseId], references: [id])
+  toWarehouse     Warehouse           @relation("TransferTo", fields: [toWarehouseId], references: [id])
+}
+
+enum StockTransferStatus {
+  DRAFT
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+model Supplier {
+  id             Int             @id @default(autoincrement())
+  name           String
+  email          String?
+  phone          String?
+  gstin          String?
+  address        Json?
+  purchaseOrders PurchaseOrder[]
+}
+
+model PurchaseOrder {
+  id         Int                 @id @default(autoincrement())
+  supplierId Int
+  status     PurchaseOrderStatus @default(DRAFT)
+  items      Json
+  total      Decimal?            @db.Decimal(18, 2)
+  expectedAt DateTime?
+  receivedAt DateTime?
+  supplier   Supplier            @relation(fields: [supplierId], references: [id])
+  createdAt  DateTime            @default(now())
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIAL
+  RECEIVED
+  CANCELLED
+}
+
+model ReturnRequest {
+  id            Int          @id @default(autoincrement())
+  userId        Int?
+  orderId       Int
+  type          ReturnType   @default(RETURN)
+  status        ReturnStatus @default(REQUESTED)
+  reason        String
+  items         Json
+  resolution    Json?
+  reversePickup Json?
+  refundAmount  Decimal?     @db.Decimal(18, 2)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  user          User?        @relation(fields: [userId], references: [id])
+
+  @@index([orderId])
+}
+
+enum ReturnType {
+  RETURN
+  EXCHANGE
+}
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  PICKUP_SCHEDULED
+  RECEIVED
+  REFUNDED
+  EXCHANGED
+  CLOSED
+}
+
+model Promotion {
+  id        Int           @id @default(autoincrement())
+  name      String
+  code      String?       @unique
+  type      PromotionType
+  rules     Json
+  benefit   Json
+  startsAt  DateTime?
+  endsAt    DateTime?
+  priority  Int           @default(0)
+  isActive  Boolean       @default(true)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+}
+
+enum PromotionType {
+  PERCENT
+  FIXED
+  BOGO
+  BUNDLE
+  QUANTITY
+  FLASH
+  CUSTOMER_PRICE
+  GIFT_CARD
+}
+
+model CmsPage {
+  id              Int      @id @default(autoincrement())
+  title           String
+  slug            String   @unique
+  content         Json
+  metaTitle       String?
+  metaDescription String?
+  isPublished     Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model SeoRedirect {
+  id         Int     @id @default(autoincrement())
+  fromPath   String  @unique
+  toPath     String
+  statusCode Int     @default(301)
+  isActive   Boolean @default(true)
+}
+
+model Faq {
+  id       Int     @id @default(autoincrement())
+  question String
+  answer   String
+  category String?
+  position Int     @default(0)
+  isActive Boolean @default(true)
+}
+
+model SupportTicket {
+  id        Int            @id @default(autoincrement())
+  userId    Int?
+  orderId   Int?
+  subject   String
+  message   String
+  status    TicketStatus   @default(OPEN)
+  priority  TicketPriority @default(NORMAL)
+  user      User?          @relation(fields: [userId], references: [id])
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+enum TicketStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model ShippingZone {
+  id               Int     @id @default(autoincrement())
+  name             String
+  countries        Json
+  regions          Json?
+  rates            Json
+  freeShippingRule Json?
+  isActive         Boolean @default(true)
+}
+
+model TaxRule {
+  id        Int     @id @default(autoincrement())
+  name      String
+  country   String  @default("IN")
+  region    String?
+  rate      Decimal @db.Decimal(7, 4)
+  inclusive Boolean @default(true)
+  hsnSac    String?
+  isActive  Boolean @default(true)
+}
+
+model StoreSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+model WebhookEndpoint {
+  id        Int      @id @default(autoincrement())
+  url       String
+  secret    String
+  events    Json
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model ActivityLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?
+  action    String
+  entity    String
+  entityId  String?
+  meta      Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model InventoryMovement {
+  id            Int                   @id @default(autoincrement())
+  variantId     Int
+  warehouseId   Int?
+  type          InventoryMovementType
+  quantity      Int
+  beforeQty     Int
+  afterQty      Int
+  referenceType String?
+  referenceId   String?
+  note          String?
+  createdById   Int?
+  createdAt     DateTime              @default(now())
+
+  @@index([variantId, createdAt])
+  @@index([warehouseId, createdAt])
+}
+
+enum InventoryMovementType {
+  IN
+  OUT
+  ADJUSTMENT
+  RESERVATION
+  RELEASE
+  SALE
+  RETURN
+  TRANSFER_IN
+  TRANSFER_OUT
+}
+
+model AuthIdentity {
+  id             Int      @id @default(autoincrement())
+  userId         Int
+  provider       String
+  providerUserId String
+  email          String?
+  createdAt      DateTime @default(now())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+}
+
+model OtpCode {
+  id         Int       @id @default(autoincrement())
+  target     String
+  channel    String
+  purpose    String    @default("LOGIN")
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([target, purpose, createdAt])
+}
+
+model GuestCart {
+  id          Int             @id @default(autoincrement())
+  token       String          @unique
+  email       String?
+  couponCode  String?
+  lastSeenAt  DateTime        @default(now())
+  recoveredAt DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  items       GuestCartItem[]
+
+  @@index([email, updatedAt])
+}
+
+model GuestCartItem {
+  id        Int            @id @default(autoincrement())
+  cartId    Int
+  variantId Int
+  quantity  Int            @default(1)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  cart      GuestCart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@unique([cartId, variantId])
+  @@index([variantId])
+}
+
+model AbandonedCart {
+  id             Int       @id @default(autoincrement())
+  userId         Int?
+  guestCartId    Int?
+  email          String?
+  status         String    @default("ABANDONED")
+  snapshot       Json
+  abandonedAt    DateTime  @default(now())
+  reminderCount  Int       @default(0)
+  lastReminderAt DateTime?
+  recoveredAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([userId, status])
+  @@index([email, status])
+}
+
+// =============================================================
+// MODULES 9-13 — Payments, orders, shipping, returns, promotions
+// =============================================================
+model PaymentRefund {
+  id               Int      @id @default(autoincrement())
+  orderId          Int
+  paymentId        Int?
+  amount           Decimal  @db.Decimal(18, 2)
+  provider         String
+  providerRefundId String?
+  status           String   @default("PENDING")
+  reason           String?
+  meta             Json?
+  createdById      Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([orderId, createdAt])
+  @@index([paymentId])
+}
+
+model Fulfillment {
+  id             Int      @id @default(autoincrement())
+  orderId        Int
+  status         String   @default("OPEN")
+  provider       String?
+  trackingNumber String?
+  trackingUrl    String?
+  labelUrl       String?
+  items          Json
+  meta           Json?
+  createdById    Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([orderId, createdAt])
+}
+
+model OrderStatusHistory {
+  id          Int      @id @default(autoincrement())
+  orderId     Int
+  fromStatus  String?
+  toStatus    String
+  note        String?
+  createdById Int?
+  createdAt   DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model StoreCreditAccount {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  balance   Decimal  @default(0) @db.Decimal(18, 2)
+  updatedAt DateTime @updatedAt
+}
+
+model StoreCreditTransaction {
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  amount        Decimal  @db.Decimal(18, 2)
+  type          String
+  referenceType String?
+  referenceId   String?
+  note          String?
+  createdAt     DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model GiftCard {
+  id            Int       @id @default(autoincrement())
+  code          String    @unique
+  initialValue  Decimal   @db.Decimal(18, 2)
+  balance       Decimal   @db.Decimal(18, 2)
+  currency      String    @default("INR")
+  customerEmail String?
+  expiresAt     DateTime?
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model PromotionRedemption {
+  id             Int      @id @default(autoincrement())
+  promotionId    Int
+  userId         Int?
+  orderId        Int?
+  discountAmount Decimal  @db.Decimal(18, 2)
+  createdAt      DateTime @default(now())
+
+  @@index([promotionId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model ShippingMethod {
+  id               Int      @id @default(autoincrement())
+  zoneId           Int
+  name             String
+  type             String
+  price            Decimal  @default(0) @db.Decimal(18, 2)
+  minOrderValue    Decimal? @db.Decimal(18, 2)
+  maxOrderValue    Decimal? @db.Decimal(18, 2)
+  minWeightKg      Decimal? @db.Decimal(10, 3)
+  maxWeightKg      Decimal? @db.Decimal(10, 3)
+  freeAbove        Decimal? @db.Decimal(18, 2)
+  estimatedMinDays Int?
+  estimatedMaxDays Int?
+  codAllowed       Boolean  @default(true)
+  localDelivery    Boolean  @default(false)
+  storePickup      Boolean  @default(false)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([zoneId, isActive])
+}
+
+model ReturnPolicy {
+  id                  Int      @id @default(autoincrement())
+  name                String
+  daysFromDelivery    Int      @default(7)
+  allowReturn         Boolean  @default(true)
+  allowExchange       Boolean  @default(true)
+  reversePickup       Boolean  @default(true)
+  refundMethods       Json
+  excludedProductIds  Json?
+  excludedCategoryIds Json?
+  conditions          Json?
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+// =============================================================
+// MODULES 14-17 — Reviews/Trust, Marketing, SEO, CMS
+// =============================================================
+model ReviewMediaV2 {
+  id           Int      @id @default(autoincrement())
+  reviewId     Int
+  type         String // IMAGE | VIDEO
+  url          String
+  thumbnailUrl String?
+  altText      String?
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([reviewId])
+}
+
+model Testimonial {
+  id         Int      @id @default(autoincrement())
+  name       String
+  title      String?
+  quote      String
+  rating     Int?
+  imageUrl   String?
+  source     String?
+  isFeatured Boolean  @default(false)
+  isActive   Boolean  @default(true)
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model TrustBadge {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  iconUrl     String?
+  linkUrl     String?
+  placement   String   @default("PRODUCT")
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model MarketingCampaign {
+  id          Int       @id @default(autoincrement())
+  name        String
+  channel     String // EMAIL | SMS | WHATSAPP
+  subject     String?
+  content     String
+  segmentId   Int?
+  status      String    @default("DRAFT") // DRAFT SCHEDULED SENDING SENT CANCELLED
+  scheduledAt DateTime?
+  sentAt      DateTime?
+  meta        Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, scheduledAt])
+}
+
+model CampaignDelivery {
+  id                Int       @id @default(autoincrement())
+  campaignId        Int
+  userId            Int?
+  destination       String
+  status            String    @default("PENDING")
+  providerMessageId String?
+  error             String?
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  openedAt          DateTime?
+  clickedAt         DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@index([campaignId, status])
+  @@index([userId])
+}
+
+model CustomerSegment {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  rules       Json
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model LoyaltyAccount {
+  id               Int      @id @default(autoincrement())
+  userId           Int      @unique
+  points           Int      @default(0)
+  lifetimeEarned   Int      @default(0)
+  lifetimeRedeemed Int      @default(0)
+  updatedAt        DateTime @updatedAt
+}
+
+model LoyaltyTransaction {
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  points        Int
+  type          String // EARN | REDEEM | ADJUST | EXPIRE
+  referenceType String?
+  referenceId   String?
+  note          String?
+  createdAt     DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model ReferralCode {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  code        String   @unique
+  rewardType  String   @default("POINTS")
+  rewardValue Decimal  @default(0) @db.Decimal(18, 2)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+}
+
+model ReferralEvent {
+  id             Int      @id @default(autoincrement())
+  referralCodeId Int
+  referredUserId Int?
+  orderId        Int?
+  status         String   @default("CLICKED")
+  rewardGranted  Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([referralCodeId, status])
+}
+
+model Affiliate {
+  id              Int      @id @default(autoincrement())
+  name            String
+  email           String
+  code            String   @unique
+  commissionType  String   @default("PERCENT")
+  commissionValue Decimal  @default(0) @db.Decimal(18, 2)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model AffiliateEvent {
+  id          Int      @id @default(autoincrement())
+  affiliateId Int
+  sessionId   String?
+  orderId     Int?
+  type        String // CLICK | CONVERSION
+  amount      Decimal? @db.Decimal(18, 2)
+  commission  Decimal? @db.Decimal(18, 2)
+  createdAt   DateTime @default(now())
+
+  @@index([affiliateId, createdAt])
+}
+
+model SeoMeta {
+  id             Int      @id @default(autoincrement())
+  entityType     String
+  entityId       String
+  title          String?
+  description    String?
+  keywords       String?
+  canonicalUrl   String?
+  robots         String?  @default("index,follow")
+  ogTitle        String?
+  ogDescription  String?
+  ogImageUrl     String?
+  structuredData Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([entityType, entityId])
+}
+
+model BlogPost {
+  id               Int       @id @default(autoincrement())
+  title            String
+  slug             String    @unique
+  excerpt          String?
+  content          Json
+  featuredImageUrl String?
+  featuredImageAlt String?
+  authorId         Int?
+  status           String    @default("DRAFT")
+  publishedAt      DateTime?
+  metaTitle        String?
+  metaDescription  String?
+  canonicalUrl     String?
+  tags             Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([status, publishedAt])
+}
+
+model NavigationMenu {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  handle    String   @unique
+  items     Json
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PageTemplate {
+  id        Int      @id @default(autoincrement())
+  name      String
+  type      String   @default("LANDING")
+  schema    Json
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ===== Modules 18-20: Support, Analytics, Tracking & Ads =====
+model ContactSubmission {
+  id           Int       @id @default(autoincrement())
+  name         String
+  email        String
+  phone        String?
+  subject      String?
+  message      String
+  status       String    @default("NEW")
+  source       String?   @default("CONTACT_FORM")
+  assignedToId Int?
+  resolvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([status, createdAt])
+  @@index([email])
+}
+
+model SupportMessage {
+  id           Int      @id @default(autoincrement())
+  ticketId     Int
+  senderUserId Int?
+  senderType   String   @default("CUSTOMER") // CUSTOMER | STAFF | SYSTEM
+  message      String
+  attachments  Json?
+  isInternal   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+}
+
+model ChatConversation {
+  id            Int           @id @default(autoincrement())
+  userId        Int?
+  guestToken    String?       @unique
+  name          String?
+  email         String?
+  phone         String?
+  status        String        @default("OPEN")
+  assignedToId  Int?
+  lastMessageAt DateTime      @default(now())
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  messages      ChatMessage[]
+
+  @@index([userId, status])
+  @@index([status, lastMessageAt])
+}
+
+model ChatMessage {
+  id             Int              @id @default(autoincrement())
+  conversationId Int
+  senderUserId   Int?
+  senderType     String // CUSTOMER | STAFF | SYSTEM
+  message        String
+  attachments    Json?
+  readAt         DateTime?
+  createdAt      DateTime         @default(now())
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model HelpCenterArticle {
+  id          Int      @id @default(autoincrement())
+  title       String
+  slug        String   @unique
+  category    String?
+  excerpt     String?
+  content     Json
+  keywords    Json?
+  isPublished Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  viewCount   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isPublished, category])
+}
+
+model AnalyticsEvent {
+  id          BigInt   @id @default(autoincrement())
+  eventName   String
+  sessionId   String?
+  userId      Int?
+  anonymousId String?
+  orderId     Int?
+  productId   Int?
+  source      String?
+  medium      String?
+  campaign    String?
+  referrer    String?
+  landingPage String?
+  value       Decimal? @db.Decimal(18, 2)
+  currency    String?  @default("INR")
+  properties  Json?
+  occurredAt  DateTime @default(now())
+
+  @@index([eventName, occurredAt])
+  @@index([sessionId, occurredAt])
+  @@index([userId, occurredAt])
+  @@index([campaign, occurredAt])
+  @@index([orderId])
+}
+
+model TrackingIntegration {
+  id           Int      @id @default(autoincrement())
+  provider     String   @unique // GA4 | GTM | GOOGLE_ADS | META
+  isEnabled    Boolean  @default(false)
+  publicConfig Json?
+  secretConfig Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model ConversionEvent {
+  id               Int       @id @default(autoincrement())
+  provider         String
+  eventName        String
+  eventId          String    @unique
+  orderId          Int?
+  userId           Int?
+  value            Decimal?  @db.Decimal(18, 2)
+  currency         String    @default("INR")
+  userData         Json?
+  eventData        Json?
+  status           String    @default("PENDING") // PENDING | SENT | FAILED | SKIPPED
+  providerResponse Json?
+  error            String?
+  sentAt           DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([provider, status, createdAt])
+  @@index([orderId])
+}
+
+model ConsentRecord {
+  id            Int      @id @default(autoincrement())
+  userId        Int?
+  anonymousId   String?
+  sessionId     String?
+  analytics     Boolean  @default(false)
+  marketing     Boolean  @default(false)
+  advertising   Boolean  @default(false)
+  functional    Boolean  @default(true)
+  policyVersion String?
+  ipHash        String?
+  userAgent     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId, updatedAt])
+  @@index([anonymousId, updatedAt])
+}
+
+model ProductFeed {
+  id              Int       @id @default(autoincrement())
+  name            String
+  channel         String // GOOGLE | META | CUSTOM
+  country         String    @default("IN")
+  currency        String    @default("INR")
+  language        String    @default("en")
+  isActive        Boolean   @default(true)
+  settings        Json?
+  lastGeneratedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+// =============================================================
+// MODULES 21-25 — TAX, STAFF, SECURITY, INTERNATIONAL, INTEGRATIONS
+// =============================================================
+model CreditNote {
+  id          Int      @id @default(autoincrement())
+  orderId     Int
+  number      String   @unique
+  amount      Decimal  @db.Decimal(18, 2)
+  taxAmount   Decimal  @default(0) @db.Decimal(18, 2)
+  reason      String?
+  lines       Json?
+  issuedAt    DateTime @default(now())
+  createdById Int?
+
+  @@index([orderId, issuedAt])
+}
+
+model InvoiceSequence {
+  key           String   @id
+  prefix        String   @default("INV")
+  nextNumber    Int      @default(1)
+  financialYear String?
+  updatedAt     DateTime @updatedAt
+}
+
+model StaffRole {
+  id          Int            @id @default(autoincrement())
+  name        String         @unique
+  description String?
+  permissions Json
+  isSystem    Boolean        @default(false)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  staff       StaffProfile[]
+}
+
+model StaffProfile {
+  id                 Int       @id @default(autoincrement())
+  userId             Int       @unique
+  roleId             Int
+  title              String?
+  isActive           Boolean   @default(true)
+  mfaEnabled         Boolean   @default(false)
+  mfaSecretEncrypted String?
+  lastLoginAt        DateTime?
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role               StaffRole @relation(fields: [roleId], references: [id])
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([roleId, isActive])
+}
+
+model ApprovalRequest {
+  id             Int       @id @default(autoincrement())
+  type           String
+  entity         String
+  entityId       String?
+  requestedById  Int
+  assignedRoleId Int?
+  payload        Json?
+  status         String    @default("PENDING")
+  reviewedById   Int?
+  reviewNote     String?
+  reviewedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([status, createdAt])
+}
+
+model StaffNotificationSetting {
+  id      Int     @id @default(autoincrement())
+  userId  Int
+  channel String
+  event   String
+  enabled Boolean @default(true)
+
+  @@unique([userId, channel, event])
+}
+
+model FraudCheck {
+  id        Int      @id @default(autoincrement())
+  orderId   Int?
+  userId    Int?
+  score     Int      @default(0)
+  decision  String   @default("ALLOW")
+  reasons   Json?
+  ipHash    String?
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([decision, createdAt])
+}
+
+model BackupRecord {
+  id          Int       @id @default(autoincrement())
+  provider    String
+  location    String?
+  status      String    @default("REQUESTED")
+  checksum    String?
+  sizeBytes   BigInt?
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  error       String?
+}
+
+model SystemIncident {
+  id         Int       @id @default(autoincrement())
+  level      String
+  source     String
+  message    String
+  stack      String?
+  meta       Json?
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([level, createdAt])
+}
+
+model CurrencyConfig {
+  code       String   @id
+  name       String
+  symbol     String
+  rateToBase Decimal  @db.Decimal(18, 6)
+  isBase     Boolean  @default(false)
+  isEnabled  Boolean  @default(true)
+  decimals   Int      @default(2)
+  updatedAt  DateTime @updatedAt
+}
+
+model LocaleConfig {
+  code         String   @id
+  name         String
+  isDefault    Boolean  @default(false)
+  isEnabled    Boolean  @default(true)
+  fallbackCode String?
+  updatedAt    DateTime @updatedAt
+}
+
+model Market {
+  id              Int      @id @default(autoincrement())
+  name            String
+  countries       Json
+  currencyCode    String
+  localeCode      String
+  priceAdjustment Decimal  @default(0) @db.Decimal(9, 4)
+  taxInclusive    Boolean  @default(true)
+  paymentMethods  Json?
+  shippingConfig  Json?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model RegionalPrice {
+  id             Int      @id @default(autoincrement())
+  productId      Int
+  variantId      Int?
+  marketId       Int
+  currency       String
+  price          Decimal  @db.Decimal(18, 2)
+  compareAtPrice Decimal? @db.Decimal(18, 2)
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, variantId, marketId])
+  @@index([marketId])
+}
+
+model ProductTranslation {
+  id              Int     @id @default(autoincrement())
+  productId       Int
+  locale          String
+  name            String
+  description     String?
+  metaTitle       String?
+  metaDescription String?
+  product         Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, locale])
+}
+
+model IntegrationConnection {
+  id         Int       @id @default(autoincrement())
+  provider   String
+  category   String
+  name       String
+  isEnabled  Boolean   @default(false)
+  config     Json?
+  secrets    Json?
+  lastSyncAt DateTime?
+  lastError  String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([provider, name])
+}
+
+model WebhookDelivery {
+  id            Int       @id @default(autoincrement())
+  endpointId    Int
+  event         String
+  payload       Json
+  status        String    @default("PENDING")
+  attempts      Int       @default(0)
+  responseCode  Int?
+  responseBody  String?
+  nextAttemptAt DateTime?
+  deliveredAt   DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([status, nextAttemptAt])
+}
+
+// ==================== MODULE 26: MOBILE & ACCESSIBILITY ====================
+model PushDevice {
+  id                   Int      @id @default(autoincrement())
+  userId               Int?
+  anonymousId          String?
+  platform             String // WEB | ANDROID | IOS
+  provider             String   @default("ONESIGNAL")
+  token                String   @unique
+  deviceName           String?
+  appVersion           String?
+  locale               String?
+  timezone             String?
+  enabled              Boolean  @default(true)
+  marketingEnabled     Boolean  @default(false)
+  transactionalEnabled Boolean  @default(true)
+  lastSeenAt           DateTime @default(now())
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([userId, enabled])
+  @@index([platform, enabled])
+}
+
+model PushNotification {
+  id          Int                        @id @default(autoincrement())
+  title       String
+  body        String
+  imageUrl    String?
+  deepLink    String?
+  category    String                     @default("TRANSACTIONAL")
+  audience    Json?
+  data        Json?
+  status      String                     @default("DRAFT")
+  scheduledAt DateTime?
+  sentAt      DateTime?
+  createdById Int?
+  createdAt   DateTime                   @default(now())
+  updatedAt   DateTime                   @updatedAt
+  deliveries  PushNotificationDelivery[]
+
+  @@index([status, scheduledAt])
+}
+
+model PushNotificationDelivery {
+  id                Int              @id @default(autoincrement())
+  notificationId    Int
+  deviceId          Int
+  status            String           @default("PENDING")
+  providerMessageId String?
+  error             String?
+  sentAt            DateTime?
+  createdAt         DateTime         @default(now())
+  notification      PushNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationId, deviceId])
+  @@index([status])
+}
+
+model MobileAppSetting {
+  key       String   @id
+  value     Json
+  isPublic  Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+}
+
+model AccessibilityIssue {
+  id         Int      @id @default(autoincrement())
+  entityType String
+  entityId   String
+  field      String
+  severity   String   @default("WARNING")
+  code       String
+  message    String
+  resolved   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([entityType, entityId])
+  @@index([resolved, severity])
+}
