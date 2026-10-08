@@ -12,14 +12,10 @@ const router = Router();
  * Ensures the single HomeSlider row exists (key="home")
  */
 async function ensureHomeSlider() {
-  const existing = await prisma.homeSlider.findUnique({
+  return prisma.homeSlider.upsert({
     where: { key: "home" },
-  });
-
-  if (existing) return existing;
-
-  return prisma.homeSlider.create({
-    data: { key: "home" },
+    update: {},
+    create: { key: "home" },
   });
 }
 

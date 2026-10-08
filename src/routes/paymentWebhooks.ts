@@ -1,0 +1,9 @@
+import { Router, Request, Response } from "express";
+import crypto from "crypto";
+import { prisma } from "../lib/prisma";
+import { decryptJson } from "../services/payments/crypto";
+import { syncOrderPayment } from "../services/payments/paymentService";
+
+const router=Router();
+router.post("/razorpay",async(req:Request,res:Response)=>{try{const cfg=await prisma.paymentGatewayConfig.findUnique({where:{provider:"Razorpay"}});if(!cfg?.isEnabled) return res.status(503).json({success:false,message:"Razorpay disabled"});const c=decryptJson<Record<string,string>>(cfg.encryptedCredentials);if(!c.webhookSecret)throw new Error("Razorpay webhook secret missing");const sig=String(req.headers["x-razorpay-signature"]||"");const raw=Buffer.isBuffer(req.body)?req.body:Buffer.from(JSON.stringify(req.body));const expected=crypto.createHmac("sha256",c.webhookSecret).update(raw).digest("hex");if(!sig||sig.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(sig),Buffer.from(expected)))return res.status(400).json({success:false,message:"Invalid webhook signature"});const body=JSON.parse(raw.toString("utf8"));const entity=body?.payload?.payment?.entity;if(["payment.captured","payment.failed"].includes(body.event)&&entity){const p=await prisma.payment.findFirst({where:{OR:[{providerOrderId:entity.order_id},{razorpayOrderId:entity.order_id}]},orderBy:{id:"desc"}});if(p){await prisma.payment.update({where:{id:p.id},data:{providerPaymentId:entity.id,razorpayPaymentId:entity.id,paymentStatus:body.event==="payment.captured"?"Paid":"Failed",isCaptured:body.event==="payment.captured",failureReason:body.event==="payment.failed"?String(entity.error_description||entity.error_reason||"Payment failed"):null,providerMeta:entity}});await syncOrderPayment(p.orderId);}}return res.json({success:true});}catch(e:any){console.error("payment webhook error",e);return res.status(500).json({success:false,message:e.message});}});
+export default router;

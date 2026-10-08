@@ -1,0 +1,1 @@
+-- Migration intentionally empty. Original failed migration was marked rolled back.

@@ -1,41 +1,1549 @@
-import { Router, Response } from 'express';
-import { z } from 'zod';
-import { prisma } from '../lib/prisma';
-import { auth, AuthRequest } from '../middleware/auth';
-import { adminOnly } from '../middleware/admin';
-const router=Router(); const db:any=prisma;
-const ok=(res:Response,data:any,status=200)=>res.status(status).json({success:true,data}); const fail=(res:Response,e:any,status=400)=>res.status(status).json({success:false,message:e?.message||'Request failed'});
+import { Router, Response } from "express";
 
-async function syncVariantTotal(tx:any,variantId:number){const a=await tx.warehouseInventory.aggregate({where:{variantId},_sum:{quantity:true,reserved:true}}); const total=Number(a._sum.quantity||0); await tx.productVariant.update({where:{id:variantId},data:{stockQuantity:total}}); return {quantity:total,reserved:Number(a._sum.reserved||0),available:total-Number(a._sum.reserved||0)};}
-async function move(tx:any,args:{variantId:number,warehouseId?:number,type:string,delta:number,referenceType?:string,referenceId?:string,note?:string,userId?:number}){let before=0,after=0;if(args.warehouseId){const row=await tx.warehouseInventory.upsert({where:{warehouseId_variantId:{warehouseId:args.warehouseId,variantId:args.variantId}},create:{warehouseId:args.warehouseId,variantId:args.variantId,quantity:0},update:{}});before=row.quantity;after=before+args.delta;if(after<0)throw new Error('Insufficient warehouse stock');await tx.warehouseInventory.update({where:{warehouseId_variantId:{warehouseId:args.warehouseId,variantId:args.variantId}},data:{quantity:after}});await syncVariantTotal(tx,args.variantId);}else{const v=await tx.productVariant.findUnique({where:{id:args.variantId}});before=v.stockQuantity;after=before+args.delta;if(after<0&&!v.allowBackorder)throw new Error('Insufficient stock and backorders are disabled');await tx.productVariant.update({where:{id:args.variantId},data:{stockQuantity:after}});}await tx.inventoryMovement.create({data:{variantId:args.variantId,warehouseId:args.warehouseId||null,type:args.type,quantity:args.delta,beforeQty:before,afterQty:after,referenceType:args.referenceType,referenceId:args.referenceId,note:args.note,createdById:args.userId}});return {before,after};}
+import { z } from "zod";
 
-// Stock overview, status and low-stock alerts
-router.get('/stock',auth,adminOnly,async(req,res)=>{try{const q=String(req.query.q||''); const rows=await db.productVariant.findMany({where:{isActive:true,...(q?{OR:[{sku:{contains:q,mode:'insensitive'}},{product:{name:{contains:q,mode:'insensitive'}}}]}:{})},include:{product:{select:{id:true,name:true,slug:true}},images:{take:1}},orderBy:{stockQuantity:'asc'},take:Math.min(Number(req.query.limit)||200,500)}); return ok(res,rows.map((v:any)=>({...v,inventoryStatus:v.stockQuantity<=0?(v.preorderEnabled?'PREORDER':v.allowBackorder?'BACKORDER':'OUT_OF_STOCK'):v.stockQuantity<=v.lowStockAlertAt?'LOW_STOCK':'IN_STOCK'})));}catch(e){return fail(res,e,500)}});
-router.get('/low-stock',auth,adminOnly,async(_req,res)=>{try{const rows=await db.productVariant.findMany({where:{isActive:true,trackInventory:true},include:{product:{select:{id:true,name:true}}},orderBy:{stockQuantity:'asc'}}); return ok(res,rows.filter((v:any)=>v.stockQuantity<=v.lowStockAlertAt));}catch(e){return fail(res,e,500)}});
-router.patch('/variants/:id/settings',auth,adminOnly,async(req,res)=>{try{const b=z.object({lowStockAlertAt:z.number().int().nonnegative().optional(),trackInventory:z.boolean().optional(),allowBackorder:z.boolean().optional(),preorderEnabled:z.boolean().optional()}).parse(req.body); return ok(res,await db.productVariant.update({where:{id:Number(req.params.id)},data:b}));}catch(e){return fail(res,e)}});
-router.post('/adjust',auth,adminOnly,async(req:AuthRequest,res)=>{try{const b=z.object({variantId:z.number().int().positive(),warehouseId:z.number().int().positive().optional(),quantityDelta:z.number().int().refine(x=>x!==0),note:z.string().max(500).optional()}).parse(req.body); return ok(res,await db.$transaction((tx:any)=>move(tx,{variantId:b.variantId,warehouseId:b.warehouseId,type:'ADJUSTMENT',delta:b.quantityDelta,note:b.note,userId:req.user!.userId})));}catch(e){return fail(res,e)}});
-router.get('/movements',auth,adminOnly,async(req,res)=>{try{return ok(res,await db.inventoryMovement.findMany({where:{...(req.query.variantId?{variantId:Number(req.query.variantId)}:{}),...(req.query.warehouseId?{warehouseId:Number(req.query.warehouseId)}:{})},orderBy:{createdAt:'desc'},take:Math.min(Number(req.query.limit)||100,500)}));}catch(e){return fail(res,e,500)}});
+import { prisma } from "../lib/prisma";
 
-// Warehouses
-router.get('/warehouses',auth,adminOnly,async(_req,res)=>{try{return ok(res,await db.warehouse.findMany({orderBy:{name:'asc'}}));}catch(e){return fail(res,e,500)}});
-router.post('/warehouses',auth,adminOnly,async(req,res)=>{try{const b=z.object({name:z.string().min(1),code:z.string().min(1),address:z.any().optional(),isActive:z.boolean().default(true)}).parse(req.body); return ok(res,await db.warehouse.create({data:b}),201);}catch(e){return fail(res,e)}});
-router.patch('/warehouses/:id',auth,adminOnly,async(req,res)=>{try{return ok(res,await db.warehouse.update({where:{id:Number(req.params.id)},data:req.body}));}catch(e){return fail(res,e)}});
-router.get('/warehouses/:id/stock',auth,adminOnly,async(req,res)=>{try{const rows=await db.warehouseInventory.findMany({where:{warehouseId:Number(req.params.id)},orderBy:{quantity:'asc'}}); const ids=rows.map((x:any)=>x.variantId), vars=await db.productVariant.findMany({where:{id:{in:ids}},include:{product:{select:{name:true,slug:true}}}}); const m=new Map(vars.map((v:any)=>[v.id,v])); return ok(res,rows.map((x:any)=>({...x,available:x.quantity-x.reserved,variant:m.get(x.variantId)})));}catch(e){return fail(res,e,500)}});
+import { auth, AuthRequest } from "../middleware/auth";
 
-// Transfers: draft -> in transit -> completed atomically
-router.get('/transfers',auth,adminOnly,async(_req,res)=>{try{return ok(res,await db.stockTransfer.findMany({orderBy:{createdAt:'desc'},include:{fromWarehouse:true,toWarehouse:true}}));}catch(e){return fail(res,e,500)}});
-router.post('/transfers',auth,adminOnly,async(req,res)=>{try{const b=z.object({fromWarehouseId:z.number().int().positive(),toWarehouseId:z.number().int().positive(),items:z.array(z.object({variantId:z.number().int().positive(),quantity:z.number().int().positive()})).min(1),notes:z.string().optional()}).parse(req.body); if(b.fromWarehouseId===b.toWarehouseId)throw new Error('Source and destination warehouses must differ'); return ok(res,await db.stockTransfer.create({data:{...b,items:b.items}}),201);}catch(e){return fail(res,e)}});
-router.patch('/transfers/:id/status',auth,adminOnly,async(req:AuthRequest,res)=>{try{const id=Number(req.params.id), {status}=z.object({status:z.enum(['IN_TRANSIT','COMPLETED','CANCELLED'])}).parse(req.body); const result=await db.$transaction(async(tx:any)=>{const t=await tx.stockTransfer.findUnique({where:{id}}); if(!t)throw new Error('Transfer not found'); if(['COMPLETED','CANCELLED'].includes(t.status))throw new Error('Transfer is already closed'); const items:any[]=t.items as any[]; if(status==='COMPLETED'){for(const item of items){await move(tx,{variantId:Number(item.variantId),warehouseId:t.fromWarehouseId,type:'TRANSFER_OUT',delta:-Number(item.quantity),referenceType:'STOCK_TRANSFER',referenceId:String(id),userId:req.user!.userId});await move(tx,{variantId:Number(item.variantId),warehouseId:t.toWarehouseId,type:'TRANSFER_IN',delta:Number(item.quantity),referenceType:'STOCK_TRANSFER',referenceId:String(id),userId:req.user!.userId});}} return tx.stockTransfer.update({where:{id},data:{status,completedAt:status==='COMPLETED'?new Date():null}})}); return ok(res,result);}catch(e){return fail(res,e)}});
+import { adminOnly } from "../middleware/admin";
 
-// Suppliers
-router.get('/suppliers',auth,adminOnly,async(_req,res)=>{try{return ok(res,await db.supplier.findMany({orderBy:{name:'asc'}}));}catch(e){return fail(res,e,500)}});
-router.post('/suppliers',auth,adminOnly,async(req,res)=>{try{const b=z.object({name:z.string().min(1),email:z.string().email().nullable().optional(),phone:z.string().nullable().optional(),gstin:z.string().nullable().optional(),address:z.any().optional()}).parse(req.body);return ok(res,await db.supplier.create({data:b}),201);}catch(e){return fail(res,e)}});
-router.patch('/suppliers/:id',auth,adminOnly,async(req,res)=>{try{return ok(res,await db.supplier.update({where:{id:Number(req.params.id)},data:req.body}));}catch(e){return fail(res,e)}});
-router.delete('/suppliers/:id',auth,adminOnly,async(req,res)=>{try{const count=await db.purchaseOrder.count({where:{supplierId:Number(req.params.id)}}); if(count)return fail(res,new Error('Supplier has purchase orders and cannot be deleted')); await db.supplier.delete({where:{id:Number(req.params.id)}}); return ok(res,{deleted:true});}catch(e){return fail(res,e)}});
 
-// Purchase orders + receiving into warehouse
-router.get('/purchase-orders',auth,adminOnly,async(_req,res)=>{try{return ok(res,await db.purchaseOrder.findMany({orderBy:{createdAt:'desc'},include:{supplier:true}}));}catch(e){return fail(res,e,500)}});
-router.post('/purchase-orders',auth,adminOnly,async(req,res)=>{try{const b=z.object({supplierId:z.number().int().positive(),items:z.array(z.object({variantId:z.number().int().positive(),quantity:z.number().int().positive(),unitCost:z.number().nonnegative().optional()})).min(1),expectedAt:z.coerce.date().nullable().optional()}).parse(req.body); const total=b.items.reduce((s,i)=>s+i.quantity*(i.unitCost||0),0); return ok(res,await db.purchaseOrder.create({data:{supplierId:b.supplierId,items:b.items,total,expectedAt:b.expectedAt,status:'DRAFT'}}),201);}catch(e){return fail(res,e)}});
-router.patch('/purchase-orders/:id/status',auth,adminOnly,async(req,res)=>{try{const {status}=z.object({status:z.enum(['DRAFT','ORDERED','CANCELLED'])}).parse(req.body); return ok(res,await db.purchaseOrder.update({where:{id:Number(req.params.id)},data:{status}}));}catch(e){return fail(res,e)}});
-router.post('/purchase-orders/:id/receive',auth,adminOnly,async(req:AuthRequest,res)=>{try{const id=Number(req.params.id), b=z.object({warehouseId:z.number().int().positive(),items:z.array(z.object({variantId:z.number().int().positive(),quantity:z.number().int().positive()})).min(1)}).parse(req.body); const result=await db.$transaction(async(tx:any)=>{const po=await tx.purchaseOrder.findUnique({where:{id}}); if(!po)throw new Error('Purchase order not found'); if(po.status==='CANCELLED')throw new Error('Purchase order is cancelled'); const ordered:any[]=po.items as any[]; for(const r of b.items){const o=ordered.find(x=>Number(x.variantId)===r.variantId); if(!o||r.quantity>Number(o.quantity))throw new Error(`Invalid received quantity for variant ${r.variantId}`); await move(tx,{variantId:r.variantId,warehouseId:b.warehouseId,type:'PURCHASE_RECEIPT',delta:r.quantity,referenceType:'PURCHASE_ORDER',referenceId:String(id),userId:req.user!.userId});} return tx.purchaseOrder.update({where:{id},data:{status:'RECEIVED',receivedAt:new Date()}})}); return ok(res,result);}catch(e){return fail(res,e)}});
+
+const router = Router();
+
+const db: any = prisma;
+
+const ok = (res: Response, data: any, status = 200) =>
+
+  res.status(status).json({ success: true, data });
+
+const fail = (res: Response, e: any, status = 400) =>
+
+  res
+
+    .status(status)
+
+    .json({
+
+      success: false,
+
+      message: e?.issues?.[0]?.message || e?.message || "Request failed",
+
+    });
+
+const n = (v: any) => Number(v || 0);
+
+
+
+async function syncVariantTotal(tx: any, variantId: number) {
+
+  const a = await tx.warehouseInventory.aggregate({
+
+    where: { variantId },
+
+    _sum: { quantity: true, reserved: true },
+
+  });
+
+  const quantity = n(a._sum.quantity),
+
+    reserved = n(a._sum.reserved);
+
+  await tx.productVariant.update({
+
+    where: { id: variantId },
+
+    data: { stockQuantity: quantity },
+
+  });
+
+  return { quantity, reserved, available: quantity - reserved };
+
+}
+
+
+
+async function move(
+  tx: any,
+  args: {
+    variantId: number;
+    warehouseId: number;
+    type:
+      | "IN"
+      | "OUT"
+      | "ADJUSTMENT"
+      | "RESERVATION"
+      | "RELEASE"
+      | "SALE"
+      | "RETURN"
+      | "TRANSFER_IN"
+      | "TRANSFER_OUT";
+    delta: number;
+    referenceType?: string;
+    referenceId?: string;
+    note?: string;
+    userId?: number;
+  },
+) {
+  if (!Number.isInteger(args.delta) || args.delta === 0) {
+    throw new Error("Inventory movement delta must be a non-zero integer");
+  }
+
+  const row = await tx.warehouseInventory.upsert({
+    where: {
+      warehouseId_variantId: {
+        warehouseId: args.warehouseId,
+        variantId: args.variantId,
+      },
+    },
+    create: {
+      warehouseId: args.warehouseId,
+      variantId: args.variantId,
+      quantity: 0,
+      reserved: 0,
+    },
+    update: {},
+  });
+
+  const before = n(row.quantity);
+  const after = before + args.delta;
+
+  if (after < 0) {
+    throw new Error(
+      `Insufficient stock for variant ${args.variantId}. Available: ${before}, requested: ${Math.abs(args.delta)}`,
+    );
+  }
+
+  await tx.warehouseInventory.update({
+    where: {
+      warehouseId_variantId: {
+        warehouseId: args.warehouseId,
+        variantId: args.variantId,
+      },
+    },
+    data: { quantity: after },
+  });
+
+  await syncVariantTotal(tx, args.variantId);
+
+  await tx.inventoryMovement.create({
+    data: {
+      variantId: args.variantId,
+      warehouseId: args.warehouseId,
+      type: args.type,
+      quantity: Math.abs(args.delta),
+      beforeQty: before,
+      afterQty: after,
+      referenceType: args.referenceType ?? null,
+      referenceId: args.referenceId ?? null,
+      note: args.note ?? null,
+      ...(args.userId ? { createdById: args.userId } : {}),
+    },
+  });
+
+  return {
+    variantId: args.variantId,
+    warehouseId: args.warehouseId,
+    type: args.type,
+    quantity: Math.abs(args.delta),
+    delta: args.delta,
+    before,
+    after,
+  };
+}
+
+const variantInclude = {
+
+  product: {
+
+    select: {
+
+      id: true,
+
+      name: true,
+
+      slug: true,
+
+      imageUrl: true,
+
+      images: { orderBy: { sortOrder: "asc" }, take: 1 },
+
+    },
+
+  },
+
+  images: { orderBy: { sortOrder: "asc" }, take: 1 },
+
+};
+
+const variantView = (v: any) => ({
+
+  ...v,
+
+  displayName: [v.product?.name, v.color, v.size].filter(Boolean).join(" / "),
+
+  imageUrl:
+
+    v.images?.[0]?.url ||
+
+    v.colorImageUrl ||
+
+    v.product?.images?.[0]?.url ||
+
+    v.product?.imageUrl ||
+
+    null,
+
+  inventoryStatus:
+
+    v.stockQuantity <= 0
+
+      ? v.preorderEnabled
+
+        ? "PREORDER"
+
+        : v.allowBackorder
+
+          ? "BACKORDER"
+
+          : "OUT_OF_STOCK"
+
+      : v.stockQuantity <= v.lowStockAlertAt
+
+        ? "LOW_STOCK"
+
+        : "IN_STOCK",
+
+});
+
+
+
+// ---------- Stock ----------
+
+router.get("/stock", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const q = String(req.query.q || "").trim();
+
+    const variants = await db.productVariant.findMany({
+
+      where: {
+
+        isActive: true,
+
+        ...(q
+
+          ? {
+
+              OR: [
+
+                { sku: { contains: q, mode: "insensitive" } },
+
+                { color: { contains: q, mode: "insensitive" } },
+
+                { size: { contains: q, mode: "insensitive" } },
+
+                { product: { name: { contains: q, mode: "insensitive" } } },
+
+              ],
+
+            }
+
+          : {}),
+
+      },
+
+      include: variantInclude,
+
+      orderBy: [{ stockQuantity: "asc" }, { id: "desc" }],
+
+      take: Math.min(n(req.query.limit) || 300, 500),
+
+    });
+
+    const ids = variants.map((v: any) => v.id);
+
+    const inv = ids.length
+
+      ? await db.warehouseInventory.findMany({
+
+          where: { variantId: { in: ids } },
+
+          include: {
+
+            warehouse: {
+
+              select: { id: true, name: true, code: true, isActive: true },
+
+            },
+
+          },
+
+        })
+
+      : [];
+
+    const by = new Map<number, any[]>();
+
+    for (const x of inv) {
+
+      if (!by.has(x.variantId)) by.set(x.variantId, []);
+
+      by.get(x.variantId)!.push({
+
+        ...x,
+
+        available: n(x.quantity) - n(x.reserved),
+
+      });
+
+    }
+
+    return ok(
+
+      res,
+
+      variants.map((v: any) => ({
+
+        ...variantView(v),
+
+        warehouses: by.get(v.id) || [],
+
+        reserved: (by.get(v.id) || []).reduce(
+
+          (s: number, x: any) => s + n(x.reserved),
+
+          0,
+
+        ),
+
+        available: (by.get(v.id) || []).reduce(
+
+          (s: number, x: any) => s + n(x.quantity) - n(x.reserved),
+
+          0,
+
+        ),
+
+      })),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+router.get("/low-stock", auth, adminOnly, async (_req, res) => {
+
+  try {
+
+    const rows = await db.productVariant.findMany({
+
+      where: { isActive: true, trackInventory: true },
+
+      include: variantInclude,
+
+      orderBy: { stockQuantity: "asc" },
+
+    });
+
+    return ok(
+
+      res,
+
+      rows
+
+        .filter((v: any) => v.stockQuantity <= v.lowStockAlertAt)
+
+        .map(variantView),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+router.patch("/variants/:id/settings", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const b = z
+
+      .object({
+
+        lowStockAlertAt: z.coerce.number().int().nonnegative().optional(),
+
+        trackInventory: z.boolean().optional(),
+
+        allowBackorder: z.boolean().optional(),
+
+        preorderEnabled: z.boolean().optional(),
+
+      })
+
+      .parse(req.body);
+
+    return ok(
+
+      res,
+
+      await db.productVariant.update({
+
+        where: { id: n(req.params.id) },
+
+        data: b,
+
+      }),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.post("/:variantId/threshold", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const b = z
+
+      .object({ lowStockAlertAt: z.coerce.number().int().nonnegative() })
+
+      .parse(req.body);
+
+    return ok(
+
+      res,
+
+      await db.productVariant.update({
+
+        where: { id: n(req.params.variantId) },
+
+        data: b,
+
+      }),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.post("/adjust", auth, adminOnly, async (req: AuthRequest, res) => {
+
+  try {
+
+    const b = z
+
+      .object({
+
+        variantId: z.coerce.number().int().positive(),
+
+        warehouseId: z.coerce.number().int().positive(),
+
+        quantityDelta: z.coerce
+
+          .number()
+
+          .int()
+
+          .refine((x) => x !== 0),
+
+        note: z.string().max(500).optional(),
+
+      })
+
+      .parse(req.body);
+
+    return ok(
+
+      res,
+
+      await db.$transaction((tx: any) =>
+
+       move(tx, {
+  variantId: b.variantId,
+  warehouseId: b.warehouseId,
+  delta: b.quantityDelta,
+  type: "ADJUSTMENT",
+  note: b.note,
+  userId: req.user!.userId,
+})
+
+      ),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.get("/movements", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    return ok(
+
+      res,
+
+      await db.inventoryMovement.findMany({
+
+        where: {
+
+          ...(req.query.variantId ? { variantId: n(req.query.variantId) } : {}),
+
+          ...(req.query.warehouseId
+
+            ? { warehouseId: n(req.query.warehouseId) }
+
+            : {}),
+
+        },
+
+        orderBy: { createdAt: "desc" },
+
+        take: Math.min(n(req.query.limit) || 100, 500),
+
+      }),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+
+
+// Variant picker for PO / transfers
+
+router.get("/variants", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const q = String(req.query.q || "").trim();
+
+    const rows = await db.productVariant.findMany({
+
+      where: {
+
+        isActive: true,
+
+        ...(q
+
+          ? {
+
+              OR: [
+
+                { sku: { contains: q, mode: "insensitive" } },
+
+                { product: { name: { contains: q, mode: "insensitive" } } },
+
+                { color: { contains: q, mode: "insensitive" } },
+
+                { size: { contains: q, mode: "insensitive" } },
+
+              ],
+
+            }
+
+          : {}),
+
+      },
+
+      include: variantInclude,
+
+      orderBy: { id: "desc" },
+
+      take: Math.min(n(req.query.limit) || 100, 200),
+
+    });
+
+    return ok(res, rows.map(variantView));
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+
+
+// ---------- Warehouses ----------
+
+router.get("/warehouses", auth, adminOnly, async (_req, res) => {
+
+  try {
+
+    return ok(res, await db.warehouse.findMany({ orderBy: { name: "asc" } }));
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+router.post("/warehouses", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const b = z
+
+      .object({
+
+        name: z.string().trim().min(1),
+
+        code: z
+
+          .string()
+
+          .trim()
+
+          .min(1)
+
+          .transform((x) => x.toUpperCase()),
+
+        address: z.any().optional(),
+
+        isActive: z.boolean().default(true),
+
+      })
+
+      .parse(req.body);
+
+    return ok(res, await db.warehouse.create({ data: b }), 201);
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.patch("/warehouses/:id", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const b = z
+
+      .object({
+
+        name: z.string().trim().min(1).optional(),
+
+        code: z
+
+          .string()
+
+          .trim()
+
+          .min(1)
+
+          .transform((x) => x.toUpperCase())
+
+          .optional(),
+
+        address: z.any().optional(),
+
+        isActive: z.boolean().optional(),
+
+      })
+
+      .parse(req.body);
+
+    return ok(
+
+      res,
+
+      await db.warehouse.update({ where: { id: n(req.params.id) }, data: b }),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.delete("/warehouses/:id", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const id = n(req.params.id);
+
+    const [inv, from, to] = await Promise.all([
+
+      db.warehouseInventory.count({
+
+        where: {
+
+          warehouseId: id,
+
+          OR: [{ quantity: { not: 0 } }, { reserved: { not: 0 } }],
+
+        },
+
+      }),
+
+      db.stockTransfer.count({ where: { fromWarehouseId: id } }),
+
+      db.stockTransfer.count({ where: { toWarehouseId: id } }),
+
+    ]);
+
+    if (inv || from || to)
+
+      throw new Error(
+
+        "Warehouse has inventory or transfer history. Disable it instead of deleting it.",
+
+      );
+
+    await db.warehouse.delete({ where: { id } });
+
+    return ok(res, { deleted: true });
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.get("/warehouses/:id/stock", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const rows = await db.warehouseInventory.findMany({
+
+      where: { warehouseId: n(req.params.id) },
+
+      orderBy: { quantity: "asc" },
+
+    });
+
+    const ids = rows.map((x: any) => x.variantId);
+
+    const vars = ids.length
+
+      ? await db.productVariant.findMany({
+
+          where: { id: { in: ids } },
+
+          include: variantInclude,
+
+        })
+
+      : [];
+
+    const m = new Map(vars.map((v: any) => [v.id, variantView(v)]));
+
+    return ok(
+
+      res,
+
+      rows.map((x: any) => ({
+
+        ...x,
+
+        available: n(x.quantity) - n(x.reserved),
+
+        variant: m.get(x.variantId),
+
+      })),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+
+
+// ---------- Suppliers ----------
+
+router.get("/suppliers", auth, adminOnly, async (_req, res) => {
+
+  try {
+
+    return ok(res, await db.supplier.findMany({ orderBy: { name: "asc" } }));
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+router.post("/suppliers", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const b = z
+
+      .object({
+
+        name: z.string().trim().min(1),
+
+        email: z
+
+          .union([z.string().email(), z.literal("")])
+
+          .nullable()
+
+          .optional(),
+
+        phone: z.string().nullable().optional(),
+
+        gstin: z.string().nullable().optional(),
+
+        address: z.any().optional(),
+
+      })
+
+      .parse(req.body);
+
+    return ok(
+
+      res,
+
+      await db.supplier.create({ data: { ...b, email: b.email || null } }),
+
+      201,
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.patch("/suppliers/:id", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const b = z
+
+      .object({
+
+        name: z.string().trim().min(1).optional(),
+
+        email: z
+
+          .union([z.string().email(), z.literal("")])
+
+          .nullable()
+
+          .optional(),
+
+        phone: z.string().nullable().optional(),
+
+        gstin: z.string().nullable().optional(),
+
+        address: z.any().optional(),
+
+      })
+
+      .parse(req.body);
+
+    return ok(
+
+      res,
+
+      await db.supplier.update({
+
+        where: { id: n(req.params.id) },
+
+        data: { ...b, ...("email" in b ? { email: b.email || null } : {}) },
+
+      }),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.delete("/suppliers/:id", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const id = n(req.params.id);
+
+    if (await db.purchaseOrder.count({ where: { supplierId: id } }))
+
+      throw new Error("Supplier has purchase orders and cannot be deleted");
+
+    await db.supplier.delete({ where: { id } });
+
+    return ok(res, { deleted: true });
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+
+
+// ---------- Purchase Orders ----------
+
+const poItem = z.object({
+
+  variantId: z.coerce.number().int().positive(),
+
+  quantity: z.coerce.number().int().positive(),
+
+  unitCost: z.coerce.number().nonnegative().default(0),
+
+});
+
+router.get("/purchase-orders", auth, adminOnly, async (_req, res) => {
+
+  try {
+
+    const rows = await db.purchaseOrder.findMany({
+
+      orderBy: { createdAt: "desc" },
+
+      include: { supplier: true },
+
+    });
+
+    const ids = [
+
+      ...new Set(
+
+        rows.flatMap((x: any) =>
+
+          (x.items || []).map((i: any) => n(i.variantId)),
+
+        ),
+
+      ),
+
+    ];
+
+    const vars = ids.length
+
+      ? await db.productVariant.findMany({
+
+          where: { id: { in: ids } },
+
+          include: variantInclude,
+
+        })
+
+      : [];
+
+    const vm = new Map(vars.map((v: any) => [v.id, variantView(v)]));
+
+    return ok(
+
+      res,
+
+      rows.map((po: any) => ({
+
+        ...po,
+
+        items: (po.items || []).map((i: any) => ({
+
+          ...i,
+
+          variant: vm.get(n(i.variantId)) || null,
+
+        })),
+
+      })),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+router.post("/purchase-orders", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const b = z
+
+      .object({
+
+        supplierId: z.coerce.number().int().positive(),
+
+        warehouseId: z.coerce.number().int().positive().optional(),
+
+        items: z.array(poItem).min(1),
+
+        expectedAt: z.coerce.date().nullable().optional(),
+
+        notes: z.string().max(1000).optional(),
+
+      })
+
+      .parse(req.body);
+
+    const items = b.items.map((i) => ({
+
+      ...i,
+
+      receivedQuantity: 0,
+
+      ...(b.warehouseId ? { warehouseId: b.warehouseId } : {}),
+
+      ...(b.notes ? { notes: b.notes } : {}),
+
+    }));
+
+    const total = items.reduce((s, i) => s + i.quantity * i.unitCost, 0);
+
+    return ok(
+
+      res,
+
+      await db.purchaseOrder.create({
+
+        data: {
+
+          supplierId: b.supplierId,
+
+          items,
+
+          total,
+
+          expectedAt: b.expectedAt,
+
+          status: "DRAFT",
+
+        },
+
+      }),
+
+      201,
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.patch(
+
+  "/purchase-orders/:id/status",
+
+  auth,
+
+  adminOnly,
+
+  async (req, res) => {
+
+    try {
+
+      const id = n(req.params.id),
+
+        { status } = z
+
+          .object({ status: z.enum(["DRAFT", "ORDERED", "CANCELLED"]) })
+
+          .parse(req.body);
+
+      const po = await db.purchaseOrder.findUnique({ where: { id } });
+
+      if (!po) throw new Error("Purchase order not found");
+
+      if (["RECEIVED", "CANCELLED"].includes(po.status))
+
+        throw new Error("Closed purchase order cannot be changed");
+
+      return ok(
+
+        res,
+
+        await db.purchaseOrder.update({ where: { id }, data: { status } }),
+
+      );
+
+    } catch (e) {
+
+      return fail(res, e);
+
+    }
+
+  },
+
+);
+
+router.post(
+
+  "/purchase-orders/:id/receive",
+
+  auth,
+
+  adminOnly,
+
+  async (req: AuthRequest, res) => {
+
+    try {
+
+      const id = n(req.params.id),
+
+        b = z
+
+          .object({
+
+            warehouseId: z.coerce.number().int().positive(),
+
+            items: z
+
+              .array(
+
+                z.object({
+
+                  variantId: z.coerce.number().int().positive(),
+
+                  quantity: z.coerce.number().int().positive(),
+
+                }),
+
+              )
+
+              .min(1),
+
+          })
+
+          .parse(req.body);
+
+      const result = await db.$transaction(async (tx: any) => {
+
+        const po = await tx.purchaseOrder.findUnique({ where: { id } });
+
+        if (!po) throw new Error("Purchase order not found");
+
+        if (po.status === "CANCELLED")
+
+          throw new Error("Purchase order is cancelled");
+
+        if (po.status === "RECEIVED")
+
+          throw new Error("Purchase order is already fully received");
+
+        const ordered: any[] = (po.items || []) as any[];
+
+        for (const r of b.items) {
+
+          const o = ordered.find((x) => n(x.variantId) === r.variantId);
+
+          if (!o)
+
+            throw new Error(
+
+              `Variant ${r.variantId} is not on this purchase order`,
+
+            );
+
+          const received = n(o.receivedQuantity);
+
+          if (received + r.quantity > n(o.quantity))
+
+            throw new Error(
+
+              `Received quantity exceeds ordered quantity for variant ${r.variantId}`,
+
+            );
+
+          await move(tx, {
+
+            variantId: r.variantId,
+
+            warehouseId: b.warehouseId,
+
+            type: "IN",
+
+            delta: r.quantity,
+
+            referenceType: "PURCHASE_ORDER",
+
+            referenceId: String(id),
+
+            userId: req.user!.userId,
+
+          });
+
+          o.receivedQuantity = received + r.quantity;
+
+          o.lastReceivedWarehouseId = b.warehouseId;
+
+        }
+
+        const complete = ordered.every(
+
+          (x) => n(x.receivedQuantity) >= n(x.quantity),
+
+        );
+
+        const any = ordered.some((x) => n(x.receivedQuantity) > 0);
+
+        return tx.purchaseOrder.update({
+
+          where: { id },
+
+          data: {
+
+            items: ordered,
+
+            status: complete ? "RECEIVED" : any ? "PARTIAL" : po.status,
+
+            receivedAt: complete ? new Date() : null,
+
+          },
+
+        });
+
+      });
+
+      return ok(res, result);
+
+    } catch (e) {
+
+      return fail(res, e);
+
+    }
+
+  },
+
+);
+
+
+
+// ---------- Stock Transfers ----------
+
+const transferItem = z.object({
+
+  variantId: z.coerce.number().int().positive(),
+
+  quantity: z.coerce.number().int().positive(),
+
+});
+
+router.get("/transfers", auth, adminOnly, async (_req, res) => {
+
+  try {
+
+    const rows = await db.stockTransfer.findMany({
+
+      orderBy: { createdAt: "desc" },
+
+      include: { fromWarehouse: true, toWarehouse: true },
+
+    });
+
+    const ids = [
+
+      ...new Set(
+
+        rows.flatMap((x: any) =>
+
+          (x.items || []).map((i: any) => n(i.variantId)),
+
+        ),
+
+      ),
+
+    ];
+
+    const vars = ids.length
+
+      ? await db.productVariant.findMany({
+
+          where: { id: { in: ids } },
+
+          include: variantInclude,
+
+        })
+
+      : [];
+
+    const vm = new Map(vars.map((v: any) => [v.id, variantView(v)]));
+
+    return ok(
+
+      res,
+
+      rows.map((t: any) => ({
+
+        ...t,
+
+        items: (t.items || []).map((i: any) => ({
+
+          ...i,
+
+          variant: vm.get(n(i.variantId)) || null,
+
+        })),
+
+      })),
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e, 500);
+
+  }
+
+});
+
+router.post("/transfers", auth, adminOnly, async (req, res) => {
+
+  try {
+
+    const b = z
+
+      .object({
+
+        fromWarehouseId: z.coerce.number().int().positive(),
+
+        toWarehouseId: z.coerce.number().int().positive(),
+
+        items: z.array(transferItem).min(1),
+
+        notes: z.string().max(1000).optional(),
+
+      })
+
+      .parse(req.body);
+
+    if (b.fromWarehouseId === b.toWarehouseId)
+
+      throw new Error("Source and destination warehouses must differ");
+
+    return ok(
+
+      res,
+
+      await db.stockTransfer.create({
+
+        data: { ...b, items: b.items, status: "DRAFT" },
+
+      }),
+
+      201,
+
+    );
+
+  } catch (e) {
+
+    return fail(res, e);
+
+  }
+
+});
+
+router.patch(
+
+  "/transfers/:id/status",
+
+  auth,
+
+  adminOnly,
+
+  async (req: AuthRequest, res) => {
+
+    try {
+
+      const id = n(req.params.id),
+
+        { status } = z
+
+          .object({ status: z.enum(["IN_TRANSIT", "COMPLETED", "CANCELLED"]) })
+
+          .parse(req.body);
+
+      const result = await db.$transaction(async (tx: any) => {
+
+        const t = await tx.stockTransfer.findUnique({ where: { id } });
+
+        if (!t) throw new Error("Transfer not found");
+
+        if (["COMPLETED", "CANCELLED"].includes(t.status))
+
+          throw new Error("Transfer is already closed");
+
+        const items: any[] = t.items as any[];
+
+        if (status === "IN_TRANSIT") {
+
+          if (t.status !== "DRAFT")
+
+            throw new Error("Only draft transfers can be dispatched");
+
+          for (const i of items)
+
+            await move(tx, {
+
+              variantId: n(i.variantId),
+
+              warehouseId: t.fromWarehouseId,
+
+              type: "TRANSFER_OUT",
+
+              delta: -n(i.quantity),
+
+              referenceType: "STOCK_TRANSFER",
+
+              referenceId: String(id),
+
+              note: "Transfer dispatched",
+
+              userId: req.user!.userId,
+
+            });
+
+        }
+
+        if (status === "COMPLETED") {
+
+          if (t.status !== "IN_TRANSIT")
+
+            throw new Error(
+
+              "Transfer must be in transit before it can be received",
+
+            );
+
+          for (const i of items)
+
+            await move(tx, {
+
+              variantId: n(i.variantId),
+
+              warehouseId: t.toWarehouseId,
+
+              type: "TRANSFER_IN",
+
+              delta: n(i.quantity),
+
+              referenceType: "STOCK_TRANSFER",
+
+              referenceId: String(id),
+
+              note: "Transfer received",
+
+              userId: req.user!.userId,
+
+            });
+
+        }
+
+        if (status === "CANCELLED" && t.status === "IN_TRANSIT") {
+
+          for (const i of items)
+
+            await move(tx, {
+
+              variantId: n(i.variantId),
+
+              warehouseId: t.fromWarehouseId,
+
+              type: "IN",
+
+              delta: n(i.quantity),
+
+              referenceType: "STOCK_TRANSFER",
+
+              referenceId: String(id),
+
+              note: "In-transit transfer cancelled",
+
+              userId: req.user!.userId,
+
+            });
+
+        }
+
+        return tx.stockTransfer.update({
+
+          where: { id },
+
+          data: {
+
+            status,
+
+            completedAt: status === "COMPLETED" ? new Date() : null,
+
+          },
+
+        });
+
+      });
+
+      return ok(res, result);
+
+    } catch (e) {
+
+      return fail(res, e);
+
+    }
+
+  },
+
+);
+
+
+
 export default router;

@@ -36,6 +36,13 @@ enum PaymentStatus {
 
 enum PaymentProvider {
   Razorpay
+  Stripe
+  PhonePe
+  Cashfree
+  PayU
+  CCAvenue
+  PayPal
+  Square
   COD
   BankTransfer
   Manual
@@ -59,16 +66,31 @@ enum CouponDiscountType {
 enum ShippingProvider {
   Shiprocket
   Delhivery
+  BlueDart
+  Xpressbees
+  EcomExpress
+  DTDC
+  IndiaPost
+  Local
+  Custom
   Manual
 }
 
 enum ShipmentStatus {
   NotCreated
+  Draft
+  ReadyToShip
   Created
+  AwbAssigned
+  PickupScheduled
   Picked
   InTransit
   OutForDelivery
   Delivered
+  DeliveryFailed
+  NDR
+  RTOInitiated
+  RTOInTransit
   RTO
   Cancelled
   Failed
@@ -292,9 +314,15 @@ model Order {
 model Payment {
   id                Int             @id @default(autoincrement())
   orderId           Int
+  // Legacy Razorpay fields kept during migration.
   razorpayOrderId   String?
   razorpayPaymentId String?
   razorpaySignature String?
+  // Provider-neutral identifiers used by the unified payment module.
+  providerOrderId   String?
+  providerPaymentId String?
+  providerSignature String?
+  providerMeta      Json?
   amount            Decimal         @db.Decimal(18, 2)
   currency          String          @default("INR")
   isCaptured        Boolean         @default(false)
@@ -1088,6 +1116,24 @@ model AbandonedCart {
 // =============================================================
 // MODULES 9-13 — Payments, orders, shipping, returns, promotions
 // =============================================================
+
+model PaymentGatewayConfig {
+  id                   Int             @id @default(autoincrement())
+  provider             PaymentProvider @unique
+  displayName          String
+  isEnabled            Boolean         @default(false)
+  mode                 String          @default("TEST")
+  encryptedCredentials String?
+  publicConfig         Json?
+  lastTestedAt         DateTime?
+  lastTestOk           Boolean?
+  lastError            String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  @@index([isEnabled])
+}
+
 model PaymentRefund {
   id               Int      @id @default(autoincrement())
   orderId          Int
@@ -1902,4 +1948,134 @@ model AccessibilityIssue {
 
   @@index([entityType, entityId])
   @@index([resolved, severity])
+}
+
+
+// =============================================================
+// UNIFIED SHIPPING & FULFILLMENT MODULE
+// =============================================================
+model ShippingProviderConfig {
+  id                   Int              @id @default(autoincrement())
+  provider             ShippingProvider @unique
+  displayName          String
+  isEnabled            Boolean          @default(false)
+  mode                 String           @default("TEST")
+  encryptedCredentials String?
+  publicConfig         Json?
+  lastTestedAt         DateTime?
+  lastTestOk           Boolean?
+  lastError            String?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+}
+
+model PickupLocation {
+  id           Int      @id @default(autoincrement())
+  name         String
+  contactName  String?
+  phone        String?
+  email        String?
+  address1     String
+  address2     String?
+  city         String
+  state        String
+  country      String   @default("India")
+  pincode      String
+  providerCode String?
+  isDefault    Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  @@index([pincode, isActive])
+}
+
+model Shipment {
+  id                 Int              @id @default(autoincrement())
+  orderId            Int
+  provider           ShippingProvider
+  courierName        String?
+  courierCode        String?
+  providerOrderId    String?
+  providerShipmentId String?
+  awb                String?
+  status             ShipmentStatus   @default(Draft)
+  pickupLocationId   Int?
+  weightKg           Decimal?         @db.Decimal(10, 3)
+  lengthCm           Decimal?         @db.Decimal(10, 2)
+  widthCm            Decimal?         @db.Decimal(10, 2)
+  heightCm           Decimal?         @db.Decimal(10, 2)
+  shippingCost       Decimal?         @db.Decimal(18, 2)
+  codAmount          Decimal?         @db.Decimal(18, 2)
+  labelUrl           String?
+  manifestUrl        String?
+  trackingUrl        String?
+  estimatedDelivery  DateTime?
+  pickupScheduledAt  DateTime?
+  shippedAt          DateTime?
+  deliveredAt        DateTime?
+  cancelledAt        DateTime?
+  providerMeta       Json?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  @@index([orderId])
+  @@index([awb])
+  @@index([provider, status])
+}
+
+model ShipmentItem {
+  id          Int      @id @default(autoincrement())
+  shipmentId  Int
+  orderItemId Int
+  quantity    Int
+  createdAt   DateTime @default(now())
+  @@index([shipmentId])
+  @@index([orderItemId])
+}
+
+model ShipmentTrackingEvent {
+  id          Int      @id @default(autoincrement())
+  shipmentId  Int
+  status      String
+  activity    String?
+  location    String?
+  eventTime   DateTime?
+  providerCode String?
+  raw         Json?
+  createdAt   DateTime @default(now())
+  @@index([shipmentId, createdAt])
+}
+
+model ShippingRule {
+  id               Int      @id @default(autoincrement())
+  name             String
+  zoneId           Int?
+  methodName       String
+  rateType         String   @default("FLAT")
+  rate             Decimal  @default(0) @db.Decimal(18, 2)
+  freeAbove        Decimal? @db.Decimal(18, 2)
+  codFee           Decimal? @db.Decimal(18, 2)
+  minOrderValue    Decimal? @db.Decimal(18, 2)
+  maxOrderValue    Decimal? @db.Decimal(18, 2)
+  minWeightKg      Decimal? @db.Decimal(10, 3)
+  maxWeightKg      Decimal? @db.Decimal(10, 3)
+  pincodes         Json?
+  estimatedMinDays Int?
+  estimatedMaxDays Int?
+  codAllowed       Boolean  @default(true)
+  isActive         Boolean  @default(true)
+  priority         Int      @default(100)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  @@index([isActive, priority])
+}
+
+model NdrAction {
+  id             Int      @id @default(autoincrement())
+  shipmentId     Int
+  action         String
+  reason         String?
+  requestedById  Int?
+  providerMeta   Json?
+  createdAt      DateTime @default(now())
+  @@index([shipmentId, createdAt])
 }

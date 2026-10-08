@@ -1,0 +1,11 @@
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'Draft';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'ReadyToShip';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'AwbAssigned';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'PickupScheduled';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'InTransit';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'OutForDelivery';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'DeliveryFailed';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'NDR';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'RTOInitiated';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'RTOInTransit';
+ALTER TYPE "ShipmentStatus" ADD VALUE IF NOT EXISTS 'Cancelled';
