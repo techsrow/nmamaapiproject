@@ -10,7 +10,39 @@ import { createProviderPayment, refundPayment, syncOrderPayment, verifyRazorpay 
 const router=Router(); const admin=[auth,adminOnly] as any;
 const providerValues=Object.values(PaymentProvider);
 const safe=(row:any)=>{const credentials=decryptJson<Record<string,any>>(row.encryptedCredentials); const {encryptedCredentials,...rest}=row; return {...rest,credentials:maskSecrets(credentials),configured:Object.keys(credentials).length>0};};
+// Public storefront endpoint.
+// Returns only providers enabled in admin.
+router.get("/methods", async (_req, res: Response) => {
+  try {
+    const providers = await prisma.paymentGatewayConfig.findMany({
+      where: {
+        isEnabled: true,
+      },
+      select: {
+        provider: true,
+        displayName: true,
+      },
+      orderBy: {
+        id: "asc",
+      },
+    });
 
+    return res.json({
+      success: true,
+      data: providers.map((item) => ({
+        provider: item.provider,
+        name: item.displayName || item.provider,
+      })),
+    });
+  } catch (error) {
+    console.error("Payment methods fetch failed", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load payment methods.",
+    });
+  }
+});
 router.get("/providers/catalog",...admin,(_req:AuthRequest,res:Response)=>res.json({success:true,data:Object.entries(PROVIDERS).map(([provider,x])=>({provider,...x}))}));
 router.get("/providers",...admin,async(_req:AuthRequest,res:Response)=>{const rows=await prisma.paymentGatewayConfig.findMany({orderBy:{id:"asc"}});res.json({success:true,data:rows.map(safe)});});
 router.get("/providers/:provider",...admin,async(req:AuthRequest,res:Response)=>{const provider=req.params.provider as PaymentProvider;if(!providerValues.includes(provider))return res.status(400).json({success:false,message:"Unsupported provider"});const row=await prisma.paymentGatewayConfig.findUnique({where:{provider}});return row?res.json({success:true,data:safe(row)}):res.status(404).json({success:false,message:"Provider not configured"});});
