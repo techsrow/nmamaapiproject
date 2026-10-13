@@ -9,6 +9,13 @@ type Config = Record<string, unknown>;
 
 const TIMEOUT_MS = 15000;
 
+class ShippingConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ShippingConfigError";
+  }
+}
+
 let tokenCache: {
   token: string;
   until: number;
@@ -21,17 +28,15 @@ let tokenRequest: {
 } | null = null;
 
 function configObject(value: unknown): Config {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Config;
-  }
-
-  return {};
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Config)
+    : {};
 }
 
 function numberValue(value: unknown): number | null {
   if (
     (typeof value !== "number" && typeof value !== "string") ||
-    (typeof value === "string" && value.trim() === "")
+    (typeof value === "string" && !value.trim())
   ) {
     return null;
   }
@@ -45,32 +50,36 @@ function amount(value: unknown): number {
   const result = numberValue(value);
 
   if (result === null) {
-    throw new Error("Provider returned an invalid shipping rate.");
+    throw new ShippingConfigError("Invalid shipping rate returned.");
   }
 
   return Math.round((result + Number.EPSILON) * 100) / 100;
 }
 
 function estimatedDays(value: unknown): number | undefined {
-  const result = numberValue(value);
-  return result !== null && result > 0 ? Math.ceil(result) : undefined;
+  const days = numberValue(value);
+  return days !== null && days > 0 ? Math.ceil(days) : undefined;
 }
 
 function yes(value: unknown): boolean {
   return (
     value === true ||
     value === 1 ||
-    value === "1" ||
-    String(value).toUpperCase() === "Y"
+    ["1", "Y", "YES", "TRUE"].includes(
+      String(value).trim().toUpperCase(),
+    )
   );
 }
 
 function validateInput(input: RateInput): void {
-  if (
-    !/^[1-9][0-9]{5}$/.test(String(input.pickupPincode)) ||
-    !/^[1-9][0-9]{5}$/.test(String(input.deliveryPincode))
-  ) {
-    throw new Error("Valid pickup and delivery pincodes are required.");
+  if (!/^[1-9][0-9]{5}$/.test(input.pickupPincode)) {
+    throw new Error(
+      "The store pickup PIN code is invalid. Update the active pickup location.",
+    );
+  }
+
+  if (!/^[1-9][0-9]{5}$/.test(input.deliveryPincode)) {
+    throw new Error("Enter a valid six-digit delivery PIN code.");
   }
 
   if (
@@ -81,14 +90,15 @@ function validateInput(input: RateInput): void {
     throw new Error("Invalid shipping request.");
   }
 
-  const dimensions = [
-    input.package.weightKg,
-    input.package.lengthCm,
-    input.package.widthCm,
-    input.package.heightCm,
-  ];
-
-  if (dimensions.some((value) => !Number.isFinite(value) || value <= 0)) {
+  if (
+    !input.package ||
+    [
+      input.package.weightKg,
+      input.package.lengthCm,
+      input.package.widthCm,
+      input.package.heightCm,
+    ].some((value) => !Number.isFinite(value) || value <= 0)
+  ) {
     throw new Error("Valid package weight and dimensions are required.");
   }
 }
@@ -100,7 +110,7 @@ function logFailure(provider: string, error: unknown): void {
     try {
       endpoint = new URL(error.config?.url || "").pathname;
     } catch {
-      // Never log request headers, credentials, tokens or payloads.
+      // Do not log headers, tokens, response bodies or customer details.
     }
 
     console.error("Shipping provider request failed", {
@@ -113,24 +123,26 @@ function logFailure(provider: string, error: unknown): void {
     return;
   }
 
-  // Avoid logging arbitrary exception objects containing sensitive data.
-  console.error("Shipping provider configuration or response failed", {
+  console.error("Shipping provider configuration failed", {
     provider,
+    reason:
+      error instanceof ShippingConfigError
+        ? error.message
+        : "Provider configuration could not be read.",
   });
 }
 
 export async function shiprocketToken(): Promise<string> {
-  // Also confirms Shiprocket remains enabled.
   const { credentials } = await credentialsFor("Shiprocket");
-
   const email = String(credentials.email || "").trim();
   const password = String(credentials.password || "");
 
   if (!email || !password) {
-    throw new Error("Shiprocket credentials are incomplete.");
+    throw new ShippingConfigError(
+      "Shiprocket email or password is missing.",
+    );
   }
 
-  // Changing either credential invalidates the cached token.
   const credentialHash = crypto
     .createHash("sha256")
     .update(JSON.stringify([email, password]))
@@ -156,8 +168,10 @@ export async function shiprocketToken(): Promise<string> {
 
     const token = response.data?.token;
 
-    if (typeof token !== "string" || !token) {
-      throw new Error("Shiprocket token not received.");
+    if (typeof token !== "string" || !token.trim()) {
+      throw new ShippingConfigError(
+        "Shiprocket did not return an authentication token.",
+      );
     }
 
     tokenCache = {
@@ -174,143 +188,8 @@ export async function shiprocketToken(): Promise<string> {
   try {
     return await promise;
   } finally {
-    if (tokenRequest?.promise === promise) {
-      tokenRequest = null;
-    }
+    if (tokenRequest?.promise === promise) tokenRequest = null;
   }
-}
-
-async function configuredRuleRates(
-  input: RateInput,
-  provider: "Local" | "Custom",
-): Promise<ShippingRate[]> {
-  const rules = await prisma.shippingRule.findMany({
-    where: { isActive: true },
-    orderBy: [{ priority: "asc" }, { id: "asc" }],
-  });
-
-  for (const rule of rules) {
-    // Zone matching requires destination country/state.
-    // Do not accidentally apply a zone-specific rule everywhere.
-    if (rule.zoneId !== null) continue;
-
-    if (input.cod && !rule.codAllowed) continue;
-
-    const orderValue = input.declaredValue;
-    const weight = input.package.weightKg;
-
-    if (
-      rule.minOrderValue !== null &&
-      orderValue < Number(rule.minOrderValue)
-    ) {
-      continue;
-    }
-
-    if (
-      rule.maxOrderValue !== null &&
-      orderValue > Number(rule.maxOrderValue)
-    ) {
-      continue;
-    }
-
-    if (
-      rule.minWeightKg !== null &&
-      weight < Number(rule.minWeightKg)
-    ) {
-      continue;
-    }
-
-    if (
-      rule.maxWeightKg !== null &&
-      weight > Number(rule.maxWeightKg)
-    ) {
-      continue;
-    }
-
-    if (rule.pincodes !== null) {
-      if (!Array.isArray(rule.pincodes)) {
-        console.warn("Invalid shipping rule pincode configuration", {
-          ruleId: rule.id,
-        });
-        continue;
-      }
-
-      const pins = rule.pincodes.map((pin) => String(pin).trim());
-
-      if (
-        pins.length > 0 &&
-        !pins.includes(String(input.deliveryPincode))
-      ) {
-        continue;
-      }
-    }
-
-    // The current admin saves flat charges.
-    // Unsupported types must not silently be treated as flat rates.
-    if (rule.rateType !== "FLAT") {
-      console.warn("Unsupported shipping rule rate type", {
-        ruleId: rule.id,
-        rateType: rule.rateType,
-      });
-      continue;
-    }
-
-    const baseRate = numberValue(String(rule.rate));
-    const freeAbove =
-      rule.freeAbove === null
-        ? null
-        : numberValue(String(rule.freeAbove));
-
-    const codFee =
-      rule.codFee === null
-        ? 0
-        : numberValue(String(rule.codFee));
-
-    if (
-      baseRate === null ||
-      (rule.freeAbove !== null && freeAbove === null) ||
-      codFee === null
-    ) {
-      console.warn("Invalid shipping rule amounts", {
-        ruleId: rule.id,
-      });
-      continue;
-    }
-
-    // A saved threshold of zero means free shipping for every order.
-    const freeShipping =
-      freeAbove !== null && orderValue >= freeAbove;
-
-    const deliveryCharge = freeShipping ? 0 : baseRate;
-    const additionalCodFee = input.cod ? codFee : 0;
-
-    return [
-      {
-        provider,
-        courierName: rule.methodName || rule.name,
-        courierCode: `rule-${rule.id}`,
-        rate: amount(deliveryCharge + additionalCodFee),
-        estimatedDays: estimatedDays(
-          rule.estimatedMaxDays ?? rule.estimatedMinDays,
-        ),
-        codAvailable: rule.codAllowed,
-        meta: {
-          source: "ShippingRule",
-          ruleId: rule.id,
-          ruleName: rule.name,
-          priority: rule.priority,
-          baseRate,
-          freeShipping,
-          deliveryCharge,
-          codFee: additionalCodFee,
-          estimatedMinDays: rule.estimatedMinDays,
-          estimatedMaxDays: rule.estimatedMaxDays,
-        },
-      },
-    ];
-  }
-
-  return [];
 }
 
 async function shiprocketRates(
@@ -324,9 +203,7 @@ async function shiprocketRates(
     const response = await axios.get(
       "https://apiv2.shiprocket.in/v1/external/courier/serviceability/",
       {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
         params: {
           pickup_postcode: input.pickupPincode,
           delivery_postcode: input.deliveryPincode,
@@ -340,7 +217,6 @@ async function shiprocketRates(
 
     data = response.data;
   } catch (error) {
-    // Expired/revoked tokens are cleared. Do not retry a blocked account.
     if (
       axios.isAxiosError(error) &&
       error.response?.status === 401
@@ -354,22 +230,22 @@ async function shiprocketRates(
   const companies = data?.data?.available_courier_companies;
 
   if (!Array.isArray(companies)) {
-    throw new Error("Shiprocket returned an invalid rates response.");
+    throw new ShippingConfigError(
+      "Shiprocket returned an invalid rates response.",
+    );
   }
 
   const rates: ShippingRate[] = [];
 
   for (const courier of companies) {
     const rate = numberValue(courier.rate ?? courier.freight_charge);
-    const courierId =
-      courier.courier_company_id ?? courier.courier_id;
-
+    const id = courier.courier_company_id ?? courier.courier_id;
     const codAvailable = yes(courier.cod);
 
     if (
       rate === null ||
-      courierId === undefined ||
-      courierId === null ||
+      id === undefined ||
+      id === null ||
       (input.cod && !codAvailable)
     ) {
       continue;
@@ -377,8 +253,8 @@ async function shiprocketRates(
 
     rates.push({
       provider: "Shiprocket",
-      courierName: String(courier.courier_name || "Shiprocket Courier"),
-      courierCode: String(courierId),
+      courierName: String(courier.courier_name || "Shiprocket"),
+      courierCode: String(id),
       rate: amount(rate),
       estimatedDays: estimatedDays(
         courier.estimated_delivery_days ?? courier.etd_days,
@@ -397,30 +273,40 @@ async function delhiveryRates(
 ): Promise<ShippingRate[]> {
   const row = configObject(providerConfig);
   const config = configObject(row.publicConfig);
-
   const { credentials } = await credentialsFor("Delhivery");
   const token = String(credentials.token || "").trim();
 
   if (!token) {
-    throw new Error("Delhivery API token is missing.");
+    throw new ShippingConfigError("Delhivery API token is missing.");
   }
 
-  // Production account rates are required for checkout.
   if (String(row.mode).toUpperCase() !== "LIVE") {
-    throw new Error("Delhivery checkout rates require LIVE configuration.");
+    throw new ShippingConfigError(
+      "Delhivery checkout quotes require LIVE mode.",
+    );
   }
 
-  // Configure these according to the merchant's Delhivery contract.
-  const billingMode = config.billingMode;
+  const billingMode = String(
+    config.billingMode ?? process.env.DELHIVERY_BILLING_MODE ?? "",
+  )
+    .trim()
+    .toUpperCase();
 
   if (billingMode !== "E" && billingMode !== "S") {
-    throw new Error("Delhivery billingMode must be configured as E or S.");
+    throw new ShippingConfigError(
+      "Configure Delhivery billingMode or DELHIVERY_BILLING_MODE as E or S.",
+    );
   }
 
-  const divisor = numberValue(config.volumetricDivisor);
+  const divisor = numberValue(
+    config.volumetricDivisor ??
+      process.env.DELHIVERY_VOLUMETRIC_DIVISOR,
+  );
 
   if (divisor === null || divisor <= 0) {
-    throw new Error("Delhivery volumetricDivisor must be configured.");
+    throw new ShippingConfigError(
+      "Configure Delhivery volumetricDivisor or DELHIVERY_VOLUMETRIC_DIVISOR.",
+    );
   }
 
   const headers = {
@@ -432,9 +318,7 @@ async function delhiveryRates(
     "https://track.delhivery.com/c/api/pin-codes/json/",
     {
       headers,
-      params: {
-        filter_codes: input.deliveryPincode,
-      },
+      params: { filter_codes: input.deliveryPincode },
       timeout: TIMEOUT_MS,
     },
   );
@@ -442,27 +326,25 @@ async function delhiveryRates(
   const codes = serviceResponse.data?.delivery_codes;
 
   if (!Array.isArray(codes)) {
-    throw new Error("Delhivery returned invalid serviceability data.");
+    throw new ShippingConfigError(
+      "Delhivery returned invalid serviceability data.",
+    );
   }
 
   const postal = codes
     .map((entry: any) => entry?.postal_code)
     .find(
       (entry: any) =>
-        String(entry?.pin) === String(input.deliveryPincode),
+        String(entry?.pin).trim() === input.deliveryPincode,
     );
 
-  if (!postal) return [];
-
-  // A provider restriction must not be overridden locally.
-  if (String(postal.remarks || "").trim()) return [];
+  if (!postal || String(postal.remarks || "").trim()) return [];
 
   const codAvailable = yes(postal.cod);
-  const prepaidAvailable = yes(postal.pre_paid);
 
   if (
     (input.cod && !codAvailable) ||
-    (!input.cod && !prepaidAvailable)
+    (!input.cod && !yes(postal.pre_paid))
   ) {
     return [];
   }
@@ -498,23 +380,25 @@ async function delhiveryRates(
     ? response.data
     : [response.data];
 
-  const validQuotes = rows.filter(
+  const quotes = rows.filter(
     (quote: any) =>
       quote &&
       !quote.error &&
       numberValue(quote.total_amount) !== null,
   );
 
-  if (validQuotes.length !== 1) {
-    throw new Error("Delhivery returned an ambiguous or invalid quote.");
+  if (quotes.length !== 1) {
+    throw new ShippingConfigError(
+      "Delhivery returned an ambiguous or invalid quote.",
+    );
   }
 
-  const quote = validQuotes[0];
-  const rate = amount(quote.total_amount);
+  const rate = amount(quotes[0].total_amount);
 
-  // Zero carrier estimates should not silently become free delivery.
   if (rate <= 0) {
-    throw new Error("Delhivery did not return a usable shipping charge.");
+    throw new ShippingConfigError(
+      "Delhivery did not return a usable shipping charge.",
+    );
   }
 
   return [
@@ -524,89 +408,142 @@ async function delhiveryRates(
       courierCode: `Delhivery-${billingMode}`,
       rate,
       codAvailable,
-      meta: {
-        estimated: true,
-        billingMode,
-      },
+      meta: { estimated: true, billingMode },
     },
   ];
 }
 
-function localRates(
+async function configuredRuleRates(
   input: RateInput,
-  row: any,
-): ShippingRate[] {
-  const config = configObject(row.publicConfig);
+  provider: "Local" | "Custom",
+): Promise<ShippingRate[]> {
+  const rules = await prisma.shippingRule.findMany({
+    where: { isActive: true },
+    orderBy: [{ priority: "asc" }, { id: "asc" }],
+  });
 
-  if (
-    config.pincodes !== undefined &&
-    !Array.isArray(config.pincodes)
-  ) {
-    throw new Error("Invalid local shipping pincode configuration.");
-  }
+  for (const rule of rules) {
+    let reason = "";
 
-  const pins = Array.isArray(config.pincodes)
-    ? config.pincodes.map((pin) => String(pin).trim())
-    : [];
+    if (rule.zoneId !== null) {
+      reason = "Zone matching requires destination country/state.";
+    } else if (input.cod && !rule.codAllowed) {
+      reason = "COD is not allowed.";
+    } else if (
+      rule.minOrderValue !== null &&
+      input.declaredValue < Number(rule.minOrderValue)
+    ) {
+      reason = "Order value is below the rule minimum.";
+    } else if (
+      rule.maxOrderValue !== null &&
+      input.declaredValue > Number(rule.maxOrderValue)
+    ) {
+      reason = "Order value exceeds the rule maximum.";
+    } else if (
+      rule.minWeightKg !== null &&
+      input.package.weightKg < Number(rule.minWeightKg)
+    ) {
+      reason = "Package weight is below the rule minimum.";
+    } else if (
+      rule.maxWeightKg !== null &&
+      input.package.weightKg > Number(rule.maxWeightKg)
+    ) {
+      reason = "Package weight exceeds the rule maximum.";
+    } else if (String(rule.rateType).toUpperCase() !== "FLAT") {
+      reason = "This rate adapter supports FLAT rules only.";
+    }
 
-  // Preserves the existing rule: an empty list covers all pincodes.
-  if (
-    pins.length > 0 &&
-    !pins.includes(String(input.deliveryPincode))
-  ) {
-    return [];
-  }
+    if (!reason && rule.pincodes !== null) {
+      if (!Array.isArray(rule.pincodes)) {
+        reason = "The rule pincode configuration is invalid.";
+      } else {
+        const pins = rule.pincodes.map((pin) =>
+          String(pin).trim(),
+        );
 
-  const codAvailable = config.codAllowed === true;
+        if (
+          pins.length > 0 &&
+          !pins.includes(input.deliveryPincode)
+        ) {
+          reason = "The destination does not match the rule.";
+        }
+      }
+    }
 
-  if (input.cod && !codAvailable) {
-    return [];
-  }
+    if (reason) {
+      console.info("Shipping rule skipped", {
+        ruleId: rule.id,
+        reason,
+      });
+      continue;
+    }
 
-  // A rate must be explicitly configured. Zero is allowed if saved in admin.
-  const baseRate = numberValue(config.rate);
+    const baseRate = numberValue(String(rule.rate));
+    const freeAbove =
+      rule.freeAbove === null
+        ? null
+        : numberValue(String(rule.freeAbove));
+    const codFee =
+      rule.codFee === null
+        ? 0
+        : numberValue(String(rule.codFee));
 
-  if (baseRate === null) {
-    throw new Error("Local shipping rate is not configured.");
-  }
+    if (
+      baseRate === null ||
+      codFee === null ||
+      (rule.freeAbove !== null && freeAbove === null)
+    ) {
+      console.warn("Shipping rule has invalid amounts", {
+        ruleId: rule.id,
+      });
+      continue;
+    }
 
-  const freeAbove =
-    config.freeAbove === undefined
-      ? null
-      : numberValue(config.freeAbove);
+    const freeShipping =
+      freeAbove !== null && input.declaredValue >= freeAbove;
+    const deliveryCharge = freeShipping ? 0 : baseRate;
+    const additionalCodFee = input.cod ? codFee : 0;
 
-  if (
-    config.freeAbove !== undefined &&
-    freeAbove === null
-  ) {
-    throw new Error("Invalid free-shipping threshold.");
-  }
-
-  const freeShipping =
-    freeAbove !== null &&
-    freeAbove > 0 &&
-    input.declaredValue >= freeAbove;
-
-  return [
-    {
-      provider: row.provider,
-      courierName: String(row.displayName || row.provider),
-      courierCode: String(row.id),
-      rate: freeShipping ? 0 : amount(baseRate),
-      estimatedDays: estimatedDays(config.estimatedDays),
-      codAvailable,
-      meta: {
-        local: true,
-        freeShipping,
+    return [
+      {
+        provider,
+        courierName: rule.methodName || rule.name,
+        courierCode: `rule-${rule.id}`,
+        rate: amount(deliveryCharge + additionalCodFee),
+        estimatedDays: estimatedDays(
+          rule.estimatedMaxDays ?? rule.estimatedMinDays,
+        ),
+        codAvailable: rule.codAllowed,
+        meta: {
+          source: "ShippingRule",
+          ruleId: rule.id,
+          priority: rule.priority,
+          freeShipping,
+          deliveryCharge,
+          codFee: additionalCodFee,
+        },
       },
-    },
-  ];
+    ];
+  }
+
+  console.warn("No active shipping rule matched", {
+    provider,
+    activeRuleCount: rules.length,
+  });
+
+  return [];
 }
 
 export async function getShippingRates(
   input: RateInput,
 ): Promise<ShippingRate[]> {
-  validateInput(input);
+  const normalized: RateInput = {
+    ...input,
+    pickupPincode: String(input.pickupPincode ?? "").trim(),
+    deliveryPincode: String(input.deliveryPincode ?? "").trim(),
+  };
+
+  validateInput(normalized);
 
   const providers = await prisma.shippingProviderConfig.findMany({
     where: { isEnabled: true },
@@ -617,30 +554,35 @@ export async function getShippingRates(
     throw new Error("No shipping provider is currently enabled.");
   }
 
-  // ShippingRule has no provider association.
-  // Choose one enabled rule-based provider to avoid duplicate methods.
+  // ShippingRule currently has no provider association.
+  // Use one enabled rule-based provider to prevent duplicate options.
   const ruleProvider =
-    providers.find((row) => row.provider === "Local") ??
-    providers.find((row) => row.provider === "Custom");
+    providers.find((provider) => provider.provider === "Local") ??
+    providers.find((provider) => provider.provider === "Custom");
 
   const results = await Promise.all(
     providers.map(async (provider): Promise<ShippingRate[]> => {
       try {
+        let rates: ShippingRate[];
+
         switch (provider.provider) {
           case "Shiprocket":
-            return await shiprocketRates(input);
+            rates = await shiprocketRates(normalized);
+            break;
 
           case "Delhivery":
-            return await delhiveryRates(input, provider);
+            rates = await delhiveryRates(normalized, provider);
+            break;
 
           case "Local":
           case "Custom":
             if (provider.id !== ruleProvider?.id) return [];
 
-            return await configuredRuleRates(
-              input,
+            rates = await configuredRuleRates(
+              normalized,
               provider.provider,
             );
+            break;
 
           default:
             console.warn("Shipping rate adapter is unavailable", {
@@ -648,6 +590,14 @@ export async function getShippingRates(
             });
             return [];
         }
+
+        if (!rates.length) {
+          console.warn("Shipping provider returned no eligible rates", {
+            provider: provider.provider,
+          });
+        }
+
+        return rates;
       } catch (error) {
         logFailure(provider.provider, error);
         return [];
@@ -661,7 +611,7 @@ export async function getShippingRates(
       (rate) =>
         Number.isFinite(rate.rate) &&
         rate.rate >= 0 &&
-        (!input.cod || rate.codAvailable),
+        (!normalized.cod || rate.codAvailable),
     )
     .sort((a, b) => a.rate - b.rate);
 
