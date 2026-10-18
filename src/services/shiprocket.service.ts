@@ -53,6 +53,7 @@ export async function getShiprocketToken(): Promise<string> {
 export async function shiprocketRequest<T = any>(
   config: AxiosRequestConfig
 ): Promise<T> {
+  if(String(config.method||'GET').toUpperCase()!=='GET'&&/orders\/create|courier\/assign\/awb/.test(String(config.url)))throw Error('Use Shipping fulfilment or automatic booking; legacy booking is disabled to prevent duplicates.');
   const doRequest = async (token: string) => {
     const res = await axios.request({
       baseURL: SR_BASE,

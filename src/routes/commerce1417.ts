@@ -80,8 +80,6 @@ r.post("/cms/blogs",...admin,async(req,res)=>{const b=req.body;res.json({success
 r.patch("/cms/blogs/:id",...admin,async(req,res)=>res.json({success:true,data:await prisma.blogPost.update({where:{id:n(req.params.id)},data:req.body})}));
 r.delete("/cms/blogs/:id",...admin,async(req,res)=>{await prisma.blogPost.delete({where:{id:n(req.params.id)}});res.json({success:true})});
 r.get("/cms/media",...admin,async(_q,res)=>res.json({success:true,data:await prisma.mediaAsset.findMany({orderBy:{createdAt:"desc"}})}));
-r.get("/cms/navigation/:handle",async(req,res)=>res.json({success:true,data:await prisma.navigationMenu.findUnique({where:{handle:req.params.handle}})}));
-r.put("/cms/navigation/:handle",...admin,async(req,res)=>{const handle=req.params.handle;res.json({success:true,data:await prisma.navigationMenu.upsert({where:{handle},create:{handle,name:req.body.name||handle,items:req.body.items||[]},update:{name:req.body.name,items:req.body.items,isActive:req.body.isActive}})})});
 r.get("/cms/templates",...admin,async(_q,res)=>res.json({success:true,data:await prisma.pageTemplate.findMany({orderBy:{createdAt:"desc"}})}));
 r.post("/cms/templates",...admin,async(req,res)=>res.json({success:true,data:await prisma.pageTemplate.create({data:req.body})}));
 

@@ -1,8 +1,11 @@
+import { cancelOrder, recordManualPayment } from "../services/payments/paymentService";
+import { PaymentError } from "../services/payments/paymentError";
+import { lockOrder } from "../services/payments/orderLifecycle";
 import { Router, Response } from "express";
 import { prisma } from "../lib/prisma";
 import { auth, AuthRequest } from "../middleware/auth";
 import { z } from "zod";
-import { Prisma } from "@prisma/client";
+import { Prisma, ShippingProvider, ShipmentStatus } from "@prisma/client";
 
 const router = Router();
 router.use(auth);
@@ -26,28 +29,16 @@ function orderNumber(id: number) {
    Zod Schemas
 ---------------------------- */
 const AllowedOrderStatus = ["Pending", "Confirmed", "Shipped", "Delivered", "Cancelled"] as const;
-const AllowedPaymentStatus = ["Pending", "Created", "Paid", "Failed", "Refunded"] as const;
+const AllowedPaymentStatus = ["Pending", "Created", "PartiallyPaid", "Paid", "Failed", "Refunded"] as const;
 
-const AllowedShippingProvider = ["Shiprocket", "Delhivery", "Manual"] as const;
-const AllowedShipmentStatus = [
-  "NotCreated",
-  "Created",
-  "Picked",
-  "InTransit",
-  "OutForDelivery",
-  "Delivered",
-  "RTO",
-  "Cancelled",
-  "Failed",
-] as const;
 
 const UpdateStatusSchema = z.object({
   status: z.enum(AllowedOrderStatus),
 });
 
 const UpdateShippingSchema = z.object({
-  shippingProvider: z.enum(AllowedShippingProvider).optional().nullable(),
-  shipmentStatus: z.enum(AllowedShipmentStatus).optional().nullable(),
+  shippingProvider: z.nativeEnum(ShippingProvider).optional().nullable(),
+  shipmentStatus: z.nativeEnum(ShipmentStatus).optional().nullable(),
 
   shipmentId: z.string().optional().nullable(),
   awbNumber: z.string().optional().nullable(),
@@ -55,7 +46,7 @@ const UpdateShippingSchema = z.object({
   trackingUrl: z.string().optional().nullable(),
   trackingCode: z.string().optional().nullable(),
 
-  shippingFee: z.number().optional().nullable(), // frontend sends number
+  shippingFee: z.number().finite().min(0).optional().nullable(), // frontend sends number
   shippingMeta: z.any().optional().nullable(), // JSON
 
   shippedAt: z.string().datetime().optional().nullable(),
@@ -184,6 +175,7 @@ router.get("/admin/:id", async (req: AuthRequest, res: Response) => {
     data: {
       ...order,
       orderNo: orderNumber(order.id),
+      shipments: await prisma.shipment.findMany({where:{orderId:id},orderBy:{id:"desc"}}),
     },
   });
 });
@@ -193,38 +185,6 @@ router.get("/admin/:id", async (req: AuthRequest, res: Response) => {
    PATCH /api/orders/:id/status
    Body: { status: "Confirmed" | "Shipped" | ... }
 ========================================================= */
-// router.patch("/:id/status", async (req: AuthRequest, res: Response) => {
-//   if (!requireAdmin(req, res)) return;
-
-//   const id = Number(req.params.id);
-//   if (!id) return res.status(400).json({ success: false, message: "Invalid order id" });
-
-//   const { status } = UpdateStatusSchema.parse(req.body);
-
-//   const existing = await prisma.order.findUnique({ where: { id } });
-//   if (!existing) return res.status(404).json({ success: false, message: "Order not found" });
-
-//   // Optional guard: don't ship if not paid
-//   if ((status === "Shipped" || status === "Delivered") && existing.paymentStatus !== "Paid") {
-//     return res.status(400).json({
-//       success: false,
-//       message: "Cannot mark as Shipped/Delivered until payment is Paid",
-//     });
-//   }
-
-//   const dataToUpdate: Prisma.OrderUpdateInput = { status };
-
-//   // useful timestamps
-//   if (status === "Shipped" && !existing.shippedAt) dataToUpdate.shippedAt = new Date();
-//   if (status === "Delivered" && !existing.deliveredAt) dataToUpdate.deliveredAt = new Date();
-
-//   const updated = await prisma.order.update({
-//     where: { id },
-//     data: dataToUpdate,
-//   });
-
-//   return res.json({ success: true, data: updated });
-// });
 
 router.patch("/:id/status", async (req: AuthRequest, res: Response) => {
   if (!requireAdmin(req, res)) return;
@@ -234,6 +194,10 @@ router.patch("/:id/status", async (req: AuthRequest, res: Response) => {
 
   const { status } = UpdateStatusSchema.parse(req.body);
 
+  if (status === "Cancelled") {
+    const data = await cancelOrder(id, "Cancelled by administrator", true);
+    return res.json({ success: true, data });
+  }
   const existing = await prisma.order.findUnique({
     where: { id },
     include: {
@@ -268,9 +232,11 @@ router.patch("/:id/status", async (req: AuthRequest, res: Response) => {
   if (status === "Shipped" && !existing.shippedAt) dataToUpdate.shippedAt = new Date();
   if (status === "Delivered" && !existing.deliveredAt) dataToUpdate.deliveredAt = new Date();
 
-  const updated = await prisma.order.update({
-    where: { id },
-    data: dataToUpdate,
+  const updated = await prisma.$transaction(async tx => {
+    await lockOrder(tx, id);
+    const current = await tx.order.findUniqueOrThrow({ where: { id } });
+    if (["Cancelled", "Returned"].includes(current.status)) throw new PaymentError("A cancelled or returned order cannot be reopened by changing its status.");
+    return tx.order.update({ where: { id }, data: dataToUpdate });
   });
 
   return res.json({ success: true, data: updated });
@@ -293,16 +259,16 @@ router.patch("/:id/shipping", async (req: AuthRequest, res: Response) => {
   if (!existing) return res.status(404).json({ success: false, message: "Order not found" });
 
   const update: Prisma.OrderUpdateInput = {
-    shippingProvider: body.shippingProvider ?? undefined,
+    shippingProvider: body.shippingProvider,
     shipmentStatus: body.shipmentStatus ?? undefined,
 
-    shipmentId: body.shipmentId ?? undefined,
-    awbNumber: body.awbNumber ?? undefined,
+    shipmentId: body.shipmentId,
+    awbNumber: body.awbNumber,
 
-    trackingUrl: body.trackingUrl ?? undefined,
-    trackingCode: body.trackingCode ?? undefined,
+    trackingUrl: body.trackingUrl,
+    trackingCode: body.trackingCode,
 
-    shippingMeta: body.shippingMeta ?? undefined,
+    shippingMeta: body.shippingMeta,
   };
 
   // convert number -> Decimal
@@ -345,21 +311,15 @@ router.patch("/:id/payment", async (req: AuthRequest, res: Response) => {
   const existing = await prisma.order.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ success: false, message: "Order not found" });
 
-  const update: Prisma.OrderUpdateInput = {
-    paymentStatus: body.paymentStatus,
-  };
-
-  if (body.paidAmount !== undefined) {
-    update.paidAmount = body.paidAmount === null ? null : new Prisma.Decimal(body.paidAmount);
+  if (body.paymentStatus === "Paid" || body.paymentStatus === "PartiallyPaid") {
+    const target = body.paymentStatus === "Paid" ? Number(existing.totalAmount) : Number(body.paidAmount);
+    if (!Number.isFinite(target) || target <= 0 || target > Number(existing.totalAmount)) throw new PaymentError("Invalid paid amount.");
+    const difference = Math.round((target - Number(existing.paidAmount || 0)) * 100) / 100;
+    if (difference <= 0) return res.json({ success: true, data: existing });
+    const result = await recordManualPayment({ orderId: id, amount: difference, provider: "Manual", reference: `admin-order:${id}:paid:${target}`, status: "Paid" });
+    return res.json({ success: true, data: result.order });
   }
-
-  // convenience: if paid then confirm
-  if (body.paymentStatus === "Paid" && existing.status === "Pending") {
-    update.status = "Confirmed";
-  }
-
-  const updated = await prisma.order.update({ where: { id }, data: update });
-  return res.json({ success: true, data: updated });
+  throw new PaymentError("Use the payment refund or verification endpoint to change financial payment status.");
 });
 
 export default router;

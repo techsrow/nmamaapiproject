@@ -1,3 +1,9 @@
+import {startShippingWorkflow} from './jobs/shippingWorkflow';
+import shippingOperations from './routes/shippingOperations';
+import { startShadowfaxCron } from "./jobs/shadowfaxCron";
+import "dotenv/config";
+import posRoutes from "./routes/pos";
+import inventoryReconciliationRoutes from "./routes/inventoryReconciliation";
 import express from "express";
 import cors from "cors";
 
@@ -14,6 +20,7 @@ import UserRoutes from "./routes/users";
 import RazorpayRoutes from "./routes/razorpay"; // legacy compatibility
 import RazorpayWebhookRoutes from "./routes/razorpayWebhook"; // legacy compatibility
 import PaymentRoutes from "./routes/payments";
+import GuestOrderRoutes from "./routes/guestOrders";
 import PaymentWebhookRoutes from "./routes/paymentWebhooks";
 import AdminDashboardRoutes from "./routes/adminDashboard";
 import CategoryRoutes from "./routes/categories";
@@ -30,12 +37,13 @@ import invoiceRoutes from "./routes/invoice";
 import shiprocketRoutes from "./routes/shiprocket";
 import ShippingUnifiedRoutes from "./routes/shippingUnified";
 import deliveryRoutes from "./routes/delivery.manager";
+import { startCheckoutMaintenance } from "./jobs/checkoutPayments.job";
 import { startShipmentCron } from "./jobs/shipmentCron";
 import adminShipment from "./routes/adminShipment";
 import adminProductImportExportRoutes
 from "./routes/adminProductImportExport.routes";
 
-import "dotenv/config";
+
 
 import shiprocketDebug from "./routes/shiprocketDebug";
 import publicCatalogRouter from "./routes/public.catalog";
@@ -51,6 +59,8 @@ import inventoryV2Routes from "./routes/inventoryV2";
 import customerAccountRoutes from "./routes/customerAccount";
 import cartV2Routes from "./routes/cartV2";
 import checkoutV2Routes from "./routes/checkoutV2";
+import navigationRoutes from "./routes/navigation";
+import adminOperationsRoutes from "./routes/adminOperations";
 import commerce913Routes from "./routes/commerce913";
 import commerce1417Routes from "./routes/commerce1417";
 import commerce1820Routes from "./routes/commerce1820";
@@ -86,10 +96,9 @@ import {
 import { auth } from "./middleware/auth";
 
 const app = express();
+app.set("trust proxy", (process.env.TRUST_PROXY || "loopback").split(",").map(value => value.trim()).filter(Boolean));
 
-app.get("/api/me", auth, (req: any, res) => {
-  res.json({ ok: true, user: req.user });
-});
+
 
 
 const PORT = Number(process.env.PORT) || 6103;
@@ -123,6 +132,9 @@ app.use(
 
 // Normal JSON parser for rest of app
 app.use(express.json());
+app.get("/api/me", auth, (req: any, res) => {
+  res.json({ ok: true, user: req.user });
+});
 
 /* ======================================================
    PUBLIC ROUTES (NO AUTH)
@@ -133,6 +145,7 @@ app.use("/api/buy-now", BuyNowRoutes);     // public buy now
 app.use("/api/checkout", CheckoutRoutes); // guest + user checkout
 app.use("/api/razorpay", RazorpayRoutes); // legacy; migrate storefront to /api/payments
 app.use("/api/payments", PaymentRoutes);
+app.use("/api/guest-orders", GuestOrderRoutes);
 app.use("/api/publicreviews", publicReviewsRoutes);
 
 
@@ -154,11 +167,14 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use("/api/reviews", ReviewRoutes);
 app.use("/api/media", auth, MediaRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/pos", posRoutes);
+app.use("/api/inventory", inventoryReconciliationRoutes);
 app.use("/api/inventory-legacy", inventoryRoutes);
 app.use("/api/inventory", inventoryV2Routes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/invoice", invoiceRoutes);
 app.use("/api/shiprocket", auth, shiprocketRoutes);
+app.use("/api/shipping/operations", shippingOperations);
 app.use("/api/shipping", ShippingUnifiedRoutes);
 
 app.use("/api/delivery", deliveryRoutes);
@@ -182,8 +198,10 @@ app.use("/api/account", customerAccountRoutes);
 app.use("/api/cart-v2", cartV2Routes);
 app.use("/api/checkout-v2", checkoutV2Routes);
 // Commerce modules 9-13
+app.use("/api", adminOperationsRoutes);
 app.use("/api/commerce", commerce913Routes);
 // Commerce modules 14-17: trust, marketing, SEO and CMS
+app.use("/api/content", navigationRoutes);
 app.use("/api/content", commerce1417Routes);
 // Commerce modules 18-20: support, analytics/reports, tracking & ads
 app.use("/api/platform", commerce1820Routes);
@@ -225,6 +243,9 @@ app.listen(PORT, "0.0.0.0", () => {
 if (process.env.DISABLE_JOBS !== "true") {
   console.log("✅ Jobs enabled");
   startShipmentCron();
+  startShippingWorkflow();
+  startShadowfaxCron();
+  startCheckoutMaintenance();
 } else {
   console.log("⛔ Jobs disabled (DISABLE_JOBS=true)");
 }

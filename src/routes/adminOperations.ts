@@ -1,0 +1,14 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { prisma } from '../lib/prisma';
+import { auth } from '../middleware/auth';
+import { adminOnly } from '../middleware/admin';
+const router=Router();
+const page=(q:any)=>{const p=z.coerce.number().int().min(1).max(100000).parse(q.page||1),take=z.coerce.number().int().min(1).max(200).parse(q.limit||25);return {skip:(p-1)*take,take}};
+router.get('/commerce/returns',auth,adminOnly,async(req,res)=>{try{res.json({success:true,data:await prisma.returnRequest.findMany({...page(req.query),orderBy:{id:'desc'}})})}catch{res.status(400).json({success:false,message:'Unable to list returns.'})}});
+const policy=z.object({name:z.string().trim().min(1).max(200),daysFromDelivery:z.coerce.number().int().min(0).max(365),allowReturn:z.boolean(),allowExchange:z.boolean(),reversePickup:z.boolean(),refundMethods:z.array(z.string().min(1)).min(1),isActive:z.boolean()});
+router.get('/commerce/returns/policies',auth,adminOnly,async(req,res)=>{try{res.json({success:true,data:await prisma.returnPolicy.findMany({...page(req.query),orderBy:{id:'desc'}})})}catch{res.status(400).json({success:false,message:'Unable to list return policies.'})}});
+router.post('/commerce/returns/policies',auth,adminOnly,async(req,res)=>{try{res.status(201).json({success:true,data:await prisma.returnPolicy.create({data:policy.parse(req.body)})})}catch{res.status(400).json({success:false,message:'Check the return policy fields.'})}});
+router.patch('/commerce/returns/policies/:id',auth,adminOnly,async(req,res)=>{try{const id=z.coerce.number().int().positive().parse(req.params.id);res.json({success:true,data:await prisma.returnPolicy.update({where:{id},data:policy.parse(req.body)})})}catch{res.status(400).json({success:false,message:'Unable to update the return policy.'})}});
+router.get('/platform/security/fraud',auth,adminOnly,async(req,res)=>{try{res.json({success:true,data:await prisma.fraudCheck.findMany({...page(req.query),orderBy:{id:'desc'},select:{id:true,orderId:true,userId:true,score:true,decision:true,reasons:true,createdAt:true}})})}catch{res.status(400).json({success:false,message:'Unable to list fraud checks.'})}});
+export default router;

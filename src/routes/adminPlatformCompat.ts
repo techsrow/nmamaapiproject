@@ -607,43 +607,7 @@ r.delete("/content/templates/:id", ...admin, async (req, s) => {
   await prisma.pageTemplate.delete({ where: { id: n(req.params.id) } });
   s.json({ success: true });
 });
-r.get("/content/navigation", ...admin, async (_q, s) =>
-  s.json({
-    success: true,
-    data: await prisma.navigationMenu.findMany({ orderBy: { name: "asc" } }),
-  }),
-);
-r.post("/content/navigation", ...admin, async (req, s) => {
-  const b = req.body || {},
-    handle = b.handle || slug(b.name);
-  s.status(201).json({
-    success: true,
-    data: await prisma.navigationMenu.create({
-      data: {
-        name: b.name,
-        handle,
-        items: json(b.items, []),
-        isActive: b.isActive !== false,
-      },
-    }),
-  });
-});
-r.patch("/content/navigation/:id", ...admin, async (req, s) => {
-  const b = { ...req.body };
-  if ("items" in b) b.items = json(b.items, []);
-  delete b.location;
-  s.json({
-    success: true,
-    data: await prisma.navigationMenu.update({
-      where: { id: n(req.params.id) },
-      data: b,
-    }),
-  });
-});
-r.delete("/content/navigation/:id", ...admin, async (req, s) => {
-  await prisma.navigationMenu.delete({ where: { id: n(req.params.id) } });
-  s.json({ success: true });
-});
+// Navigation management is handled by the validated navigation router.
 
 // Support (Contact Inbox intentionally excluded)
 r.get("/support/tickets", ...admin, async (_q, s) =>

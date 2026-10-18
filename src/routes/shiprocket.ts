@@ -1,3 +1,4 @@
+import {syncShiprocketShipment} from '../services/shipping/shiprocketLifecycle.service';
 import { Router, Response } from "express";
 import { prisma } from "../lib/prisma";
 import { auth, AuthRequest } from "../middleware/auth";
@@ -112,39 +113,7 @@ async function createShipmentForOrder(orderId: number) {
  *  - Safe: returns 400 if shipment not created
  *  - Saves mapped status + meta
  *  ========================================================= */
-async function syncShipmentForOrder(orderId: number) {
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    select: { id: true, shipmentId: true, shipmentStatus: true },
-  });
-
-  if (!order) return { ok: false, status: 404, message: "Order not found" };
-  if (!order.shipmentId) {
-    return { ok: false, status: 400, message: "Shipment not created. Click Create Shipment first." };
-  }
-
-  // ✅ shiprocketRequest returns JSON directly
-  const raw: any = await shiprocketRequest({
-    method: "GET",
-    url: `/courier/track/shipment/${encodeURIComponent(order.shipmentId)}`,
-  });
-
-  const status =
-    raw?.tracking_data?.shipment_track?.[0]?.current_status ||
-    raw?.tracking_data?.shipment_status ||
-    order.shipmentStatus;
-
-  await prisma.order.update({
-    where: { id: order.id },
-    data: {
-      shipmentStatus: status,
-      shippingMeta: raw,
-      deliveredAt: String(status).toLowerCase().includes("delivered") ? new Date() : undefined,
-    },
-  });
-
-  return { ok: true, status: 200, data: raw, mappedStatus: status };
-}
+async function syncShipmentForOrder(orderId:number){const shipment=await prisma.shipment.findFirst({where:{orderId,provider:'Shiprocket'},orderBy:{id:'desc'}});if(!shipment)return {ok:false,status:409,message:'Reconcile legacy booking in Shipping first.'};const data=await syncShiprocketShipment(shipment.id);return {ok:true,status:200,data,mappedStatus:data.status};}
 
 /* =========================================================
    ROUTES (Mounted at /api/shiprocket and /api/shipping/shiprocket)

@@ -366,6 +366,7 @@ router.post(
           userId: user.id,
           email: user.email,
           role: user.role,
+          tokenVersion: user.tokenVersion,
         },
         JWT_SECRET,
         {
@@ -386,6 +387,7 @@ router.post(
             email: user.email,
             phone: user.phone,
             role: user.role,
+          tokenVersion: user.tokenVersion,
           },
         },
       });
@@ -598,6 +600,7 @@ router.post(
 
         data: {
           passwordHash: hashed,
+          tokenVersion: { increment: 1 },
           resetPasswordToken: null,
           resetPasswordTokenExpiry: null,
         },
@@ -807,6 +810,7 @@ router.post(
           userId: user.id,
           email: user.email,
           role: user.role,
+          tokenVersion: user.tokenVersion,
         },
         JWT_SECRET,
         {
@@ -827,6 +831,7 @@ router.post(
             email: user.email,
             phone: user.phone,
             role: user.role,
+          tokenVersion: user.tokenVersion,
           },
         },
       });
@@ -1003,6 +1008,7 @@ router.post(
           userId: user.id,
           email: user.email,
           role: user.role,
+          tokenVersion: user.tokenVersion,
         },
         JWT_SECRET,
         {
@@ -1023,6 +1029,7 @@ router.post(
             email: user.email,
             phone: user.phone,
             role: user.role,
+          tokenVersion: user.tokenVersion,
           },
         },
       });

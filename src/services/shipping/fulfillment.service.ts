@@ -1,6 +1,6 @@
 import { PaymentProvider, ShippingProvider, ShipmentStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
-import { getShippingRates } from "./rate.service";
+import { getCarrierQuotes } from "./rate.service";
 
 const ACTIVE_SHIPMENT_STATUSES: ShipmentStatus[] = [
   "Draft","ReadyToShip","Created","AwbAssigned","PickupScheduled","Picked","InTransit","OutForDelivery","Delivered","DeliveryFailed","NDR","RTOInitiated","RTOInTransit","RTO"
@@ -49,7 +49,7 @@ export async function fulfillmentOrder(orderId:number){
   const shippable=(order.paymentStatus==="Paid"||isCod) && remainingQuantity>0 && order.status!=="Cancelled" && order.status!=="Returned";
   return {
     id:order.id,orderNumber:`NM-${order.id}`,orderDate:order.orderDate,status:order.status,paymentStatus:order.paymentStatus,paymentMethod:order.paymentMethod,
-    customerName:order.customerName,customerEmail:order.customerEmail,guestPhone:order.guestPhone,totalAmount:num(order.totalAmount),currency:order.currency,
+    customerName:order.customerName,customerEmail:order.customerEmail,guestPhone:order.guestPhone,totalAmount:num(order.totalAmount),currency:order.currency,shippingFee:num(order.shippingFee),
     address,items,remainingQuantity,estimatedWeightKg,isCod,codAmount:isCod?num(order.paymentDue ?? order.totalAmount):0,shippable,
     shipmentStatus:order.shipmentStatus,shippingProvider:order.shippingProvider,awbNumber:order.awbNumber,trackingUrl:order.trackingUrl
   };
@@ -68,8 +68,8 @@ export async function ratesForOrder(orderId:number,input:{pickupLocationId?:numb
   const order=await fulfillmentOrder(orderId); if(!order.shippable)throw new Error("Order is not ready to ship");
   const pickup=input.pickupLocationId?await prisma.pickupLocation.findFirst({where:{id:input.pickupLocationId,isActive:true}}):await prisma.pickupLocation.findFirst({where:{isActive:true},orderBy:[{isDefault:"desc"},{id:"asc"}]});
   if(!pickup)throw new Error("No active pickup location configured"); if(!order.address.pincode)throw new Error("Order delivery pincode is missing");
-  const rates=await getShippingRates({pickupPincode:pickup.pincode,deliveryPincode:order.address.pincode,cod:order.isCod,declaredValue:order.totalAmount,package:{weightKg:input.weightKg||order.estimatedWeightKg,lengthCm:input.lengthCm||10,widthCm:input.widthCm||10,heightCm:input.heightCm||5}});
-  return {orderId,pickupLocation:pickup,package:{weightKg:input.weightKg||order.estimatedWeightKg,lengthCm:input.lengthCm||10,widthCm:input.widthCm||10,heightCm:input.heightCm||5},rates};
+  const quotes=await getCarrierQuotes({pickupPincode:pickup.pincode,deliveryPincode:order.address.pincode,cod:order.isCod,declaredValue:Math.max(0,order.totalAmount-order.shippingFee),country:order.address.country,region:order.address.state,package:{weightKg:input.weightKg||order.estimatedWeightKg,lengthCm:input.lengthCm||10,widthCm:input.widthCm||10,heightCm:input.heightCm||5}});
+  return {orderId,pickupLocation:pickup,package:{weightKg:input.weightKg||order.estimatedWeightKg,lengthCm:input.lengthCm||10,widthCm:input.widthCm||10,heightCm:input.heightCm||5},...quotes};
 }
 
 export async function shippingDashboard(){

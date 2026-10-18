@@ -1,0 +1,1 @@
+ALTER TABLE "NavigationMenu" ADD COLUMN "locations" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];

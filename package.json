@@ -5,7 +5,10 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "node tests/shipping-rules.cjs && node tests/checkout-tax.cjs && node tests/payment-integration.cjs && node tests/shadowfax.cjs && node tests/pos.cjs && node tests/shadowfax-booking.cjs && node tests/shadowfax-lifecycle.cjs && node tests/shadowfax-webhook.cjs && node tests/admin-operations.cjs && node tests/auth-account.cjs && node tests/navigation.cjs && node tests/customer-storefront.cjs && node tests/storefront-catalog.cjs && node tests/order-documents.cjs && node tests/shadowfax-recovery.cjs && node tests/manual-carriers.cjs && node tests/return-guards.cjs && node tests/shipping-workflow.cjs && node tests/reverse-guards.cjs",
+    "preflight:inventory": "node scripts/preflight-inventory.cjs",
+    "verify:integrations": "node scripts/verify-integrations.cjs"
   },
   "keywords": [],
   "author": "",

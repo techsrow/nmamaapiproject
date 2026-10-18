@@ -132,8 +132,8 @@ function logFailure(provider: string, error: unknown): void {
   });
 }
 
-export async function shiprocketToken(): Promise<string> {
-  const { credentials } = await credentialsFor("Shiprocket");
+export async function shiprocketToken(existingShipment=false): Promise<string> {
+  const { credentials } = await credentialsFor("Shiprocket",existingShipment);
   const email = String(credentials.email || "").trim();
   const password = String(credentials.password || "");
 
@@ -413,40 +413,51 @@ async function delhiveryRates(
   ];
 }
 
-async function configuredRuleRates(
-  input: RateInput,
-  provider: "Local" | "Custom",
+export type ShippingRuleInput = { deliveryPincode: string; declaredValue: number; cod: boolean; weightKg: number; country?: string; region?: string };
+export async function getConfiguredRuleRates(
+  input: ShippingRuleInput,
 ): Promise<ShippingRate[]> {
+  if (!/^[1-9][0-9]{5}$/.test(input.deliveryPincode) || !Number.isFinite(input.declaredValue) || input.declaredValue < 0 || typeof input.cod !== "boolean") throw new Error("Invalid shipping request.");
   const rules = await prisma.shippingRule.findMany({
     where: { isActive: true },
     orderBy: [{ priority: "asc" }, { id: "asc" }],
   });
 
+  // Normal ranges win. If none match, priority chooses a default, relaxing only
+  // order-value bounds; destination, weight and COD restrictions remain mandatory.
+  for (const fallback of [false, true]) {
   for (const rule of rules) {
     let reason = "";
 
     if (rule.zoneId !== null) {
-      reason = "Zone matching requires destination country/state.";
-    } else if (input.cod && !rule.codAllowed) {
+      const zone = await prisma.shippingZone.findUnique({ where: { id: rule.zoneId } });
+      const normalize = (value: unknown) => String(value ?? "").trim().toUpperCase();
+      const matches = (values: unknown, target: string | undefined, optional: boolean) =>
+        (values === null && optional) || (Array.isArray(values) && ((optional && !values.length) || values.some(value => typeof value === "string" && normalize(value) === normalize(target))));
+      if (!zone?.isActive || !matches(zone.countries, input.country, false) || !matches(zone.regions, input.region, true)) reason = "The destination does not match the active shipping zone.";
+    }
+    if (input.cod && !rule.codAllowed) {
       reason = "COD is not allowed.";
     } else if (
-      rule.minOrderValue !== null &&
+      !fallback && rule.minOrderValue !== null &&
       input.declaredValue < Number(rule.minOrderValue)
     ) {
       reason = "Order value is below the rule minimum.";
     } else if (
-      rule.maxOrderValue !== null &&
+      !fallback && rule.maxOrderValue !== null &&
       input.declaredValue > Number(rule.maxOrderValue)
     ) {
       reason = "Order value exceeds the rule maximum.";
+    } else if ((rule.minWeightKg !== null || rule.maxWeightKg !== null) && (!Number.isFinite(input.weightKg) || input.weightKg <= 0)) {
+      reason = "Valid weight is required for this rule.";
     } else if (
       rule.minWeightKg !== null &&
-      input.package.weightKg < Number(rule.minWeightKg)
+      input.weightKg < Number(rule.minWeightKg)
     ) {
       reason = "Package weight is below the rule minimum.";
     } else if (
       rule.maxWeightKg !== null &&
-      input.package.weightKg > Number(rule.maxWeightKg)
+      input.weightKg > Number(rule.maxWeightKg)
     ) {
       reason = "Package weight exceeds the rule maximum.";
     } else if (String(rule.rateType).toUpperCase() !== "FLAT") {
@@ -504,9 +515,8 @@ async function configuredRuleRates(
     const deliveryCharge = freeShipping ? 0 : baseRate;
     const additionalCodFee = input.cod ? codFee : 0;
 
-    return [
-      {
-        provider,
+    const ruleRate: ShippingRate = {
+        provider: "Local",
         courierName: rule.methodName || rule.name,
         courierCode: `rule-${rule.id}`,
         rate: amount(deliveryCharge + additionalCodFee),
@@ -516,20 +526,29 @@ async function configuredRuleRates(
         codAvailable: rule.codAllowed,
         meta: {
           source: "ShippingRule",
+          fallback,
           ruleId: rule.id,
           priority: rule.priority,
           freeShipping,
           deliveryCharge,
           codFee: additionalCodFee,
         },
-      },
-    ];
+      };
+    const providers = await prisma.shippingProviderConfig.findMany({
+      where: { isEnabled: true }, orderBy: { id: "asc" },
+    });
+    // These are merchant-offered methods, not live courier quotes or bookings.
+    // The customer pays one rule charge irrespective of fulfillment provider.
+    if (!providers.length) return [ruleRate];
+    return providers.map(provider => ({
+      ...ruleRate,
+      provider: provider.provider,
+      courierName: `${provider.displayName || provider.provider} — ${ruleRate.courierName}`,
+      courierCode: `rule-${rule.id}-${provider.provider}`,
+      meta: { ...ruleRate.meta, fulfillmentMode: "merchant", serviceabilityChecked: false },
+    }));
   }
-
-  console.warn("No active shipping rule matched", {
-    provider,
-    activeRuleCount: rules.length,
-  });
+  }
 
   return [];
 }
@@ -543,6 +562,9 @@ export async function getShippingRates(
     deliveryPincode: String(input.deliveryPincode ?? "").trim(),
   };
 
+  // Merchant rules determine the customer charge before any live carrier quote.
+  const configured = await getConfiguredRuleRates({ deliveryPincode: normalized.deliveryPincode, declaredValue: normalized.declaredValue, cod: normalized.cod, weightKg: normalized.package?.weightKg, country: normalized.country, region: normalized.region });
+  if (configured.length) return configured;
   validateInput(normalized);
 
   const providers = await prisma.shippingProviderConfig.findMany({
@@ -553,12 +575,6 @@ export async function getShippingRates(
   if (!providers.length) {
     throw new Error("No shipping provider is currently enabled.");
   }
-
-  // ShippingRule currently has no provider association.
-  // Use one enabled rule-based provider to prevent duplicate options.
-  const ruleProvider =
-    providers.find((provider) => provider.provider === "Local") ??
-    providers.find((provider) => provider.provider === "Custom");
 
   const results = await Promise.all(
     providers.map(async (provider): Promise<ShippingRate[]> => {
@@ -576,13 +592,8 @@ export async function getShippingRates(
 
           case "Local":
           case "Custom":
-            if (provider.id !== ruleProvider?.id) return [];
-
-            rates = await configuredRuleRates(
-              normalized,
-              provider.provider,
-            );
-            break;
+            // Rules were already checked. These providers have no external rate API.
+            return [];
 
           default:
             console.warn("Shipping rate adapter is unavailable", {
@@ -622,4 +633,25 @@ export async function getShippingRates(
   }
 
   return rates;
+}
+/** Admin-only carrier estimates. Never substitute merchant checkout rules. */
+export async function getCarrierQuotes(input:RateInput){
+ const normalized={...input,pickupPincode:String(input.pickupPincode??'').trim(),deliveryPincode:String(input.deliveryPincode??'').trim()};
+ validateInput(normalized);
+ const providers=await prisma.shippingProviderConfig.findMany({where:{isEnabled:true},orderBy:{id:'asc'}});
+ const results=await Promise.all(providers.map(async provider=>{
+  try{
+   let rates:ShippingRate[]=[];
+   if(provider.provider==='Shiprocket')rates=await shiprocketRates(normalized);
+   else if(provider.provider==='Delhivery')rates=await delhiveryRates(normalized,provider);
+   else if(provider.provider==='Local'){
+    const ruleRates=await getConfiguredRuleRates({deliveryPincode:normalized.deliveryPincode,declaredValue:normalized.declaredValue,cod:normalized.cod,weightKg:normalized.package.weightKg,country:normalized.country,region:normalized.region});
+    const localRates=ruleRates.filter(rate=>rate.provider==='Local');
+    return {rates:localRates,notice:localRates.length?null:{provider:provider.provider,message:'No active shipping rule matches this delivery.'}};
+   }
+   else return {rates:[],notice:{provider:provider.provider,message:provider.provider==='Shadowfax360'?'Shadowfax live pricing is not integrated. Check the carrier portal or your contracted rate card.':'No live quote integration. Check the carrier portal or your agreed delivery cost.'}};
+   return {rates:rates.map(rate=>({...rate,meta:{...rate.meta,source:'CarrierAPI'}})),notice:rates.length?null:{provider:provider.provider,message:'The carrier returned no eligible quotes for this route.'}};
+  }catch(error){logFailure(provider.provider,error);return {rates:[],notice:{provider:provider.provider,message:error instanceof ShippingConfigError?error.message:'Carrier quote request failed. Check credentials, account access and serviceability, then retry.'}};}
+ }));
+ return {rates:results.flatMap(x=>x.rates).sort((a,b)=>a.rate-b.rate),notices:results.flatMap(x=>x.notice?[x.notice]:[])};
 }

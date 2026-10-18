@@ -1,5 +1,5 @@
 import { Router, type Response } from "express";
-import { PaymentProvider, Prisma } from "@prisma/client";
+import { PaymentProvider, PaymentStatus, PaymentMethod, Prisma } from "@prisma/client";
 
 import { prisma } from "../lib/prisma";
 import { auth, type AuthRequest } from "../middleware/auth";
@@ -23,7 +23,12 @@ import {
   verifyRazorpay,
 } from "../services/payments/paymentService";
 
+import { paymentIdentity, canAccessOrder } from "../middleware/paymentAccess";
+import { reconcileOrderPayment, cancelOrder, recordManualPayment } from "../services/payments/paymentService";
+import { PaymentError, paymentMessage, paymentStatusCode } from "../services/payments/paymentError";
+import { issueGuestTrackingAccess } from "../services/payments/orderAccess";
 const router = Router();
+router.use((_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 const admin = [auth, adminOnly];
 const providerValues = Object.values(PaymentProvider);
 
@@ -32,7 +37,7 @@ function parseProvider(value: unknown): PaymentProvider {
     typeof value !== "string" ||
     !providerValues.includes(value as PaymentProvider)
   ) {
-    throw new Error("Unsupported payment provider.");
+    throw new PaymentError("Unsupported payment provider.");
   }
 
   return value as PaymentProvider;
@@ -42,7 +47,7 @@ function positiveId(value: unknown): number {
   const id = Number(value);
 
   if (!Number.isSafeInteger(id) || id < 1) {
-    throw new Error("Invalid ID.");
+    throw new PaymentError("Invalid ID.");
   }
 
   return id;
@@ -78,23 +83,12 @@ function message(error: unknown): string {
   return error.message.slice(0, 180);
 }
 
-function ownsOrder(
-  req: AuthRequest,
-  order: { userId: number | null },
-): boolean {
-  return (
-    req.user?.role === "Admin" ||
-    (order.userId !== null &&
-      order.userId === req.user?.userId)
-  );
-}
-
 // PUBLIC: payment methods come directly from admin configuration.
 // No secrets or admin configuration are returned.
 router.get("/methods", async (_req, res: Response) => {
   try {
     const providers = await prisma.paymentGatewayConfig.findMany({
-      where: { isEnabled: true },
+      where: { isEnabled: true, provider: { in: ["Razorpay", "COD", "BankTransfer", "Manual"] } },
       select: {
         provider: true,
         displayName: true,
@@ -106,6 +100,7 @@ router.get("/methods", async (_req, res: Response) => {
 
     return res.json({
       success: true,
+      guestCheckoutVersion: 2,
       data: providers.map((provider) => ({
         provider: provider.provider,
         name: provider.displayName || provider.provider,
@@ -382,8 +377,9 @@ router.get("/", ...admin, async (req, res) => {
     }
 
     if (req.query.status !== undefined) {
-      where.paymentStatus =
-        String(req.query.status) as Prisma.PaymentWhereInput["paymentStatus"];
+      const status = String(req.query.status);
+      if (!Object.values(PaymentStatus).includes(status as PaymentStatus)) throw new PaymentError("Invalid payment status.");
+      where.paymentStatus = status as PaymentStatus;
     }
 
     const [data, total] = await Promise.all([
@@ -445,7 +441,7 @@ router.get("/refunds", ...admin, async (req, res) => {
 
 router.get(
   "/order/:orderId",
-  auth,
+  paymentIdentity,
   async (req: AuthRequest, res: Response) => {
     try {
       const id = positiveId(req.params.orderId);
@@ -462,25 +458,25 @@ router.get(
         });
       }
 
-      if (!ownsOrder(req, order)) {
+      if (!canAccessOrder(req, order)) {
         return res.status(403).json({
           success: false,
           message: "Forbidden.",
         });
       }
 
-      const refunds = await prisma.paymentRefund.findMany({
-        where: { orderId: id },
-      });
-
-      return res.json({
-        success: true,
-        data: { order, payments: order.payments, refunds },
-      });
+      await reconcileOrderPayment(id);
+      const current = await prisma.order.findUniqueOrThrow({ where: { id } });
+      return res.json({ success: true, data: { order: {
+        id: current.id, totalAmount: current.totalAmount, currency: current.currency,
+        paymentStatus: current.paymentStatus, paymentDue: current.paymentDue ?? current.totalAmount,
+        status: current.status,
+        trackingAccessToken: current.userId === null ? issueGuestTrackingAccess(current.id) : undefined,
+      } } });
     } catch (error) {
-      return res.status(400).json({
+      return res.status(paymentStatusCode(error)).json({
         success: false,
-        message: message(error),
+        message: paymentMessage(error),
       });
     }
   },
@@ -490,7 +486,7 @@ router.get(
 // The payment service must implement that provider's adapter.
 router.post(
   "/create",
-  auth,
+  paymentIdentity,
   async (req: AuthRequest, res: Response) => {
     try {
       const orderId = positiveId(req.body?.orderId);
@@ -507,7 +503,7 @@ router.post(
         });
       }
 
-      if (!ownsOrder(req, order)) {
+      if (!canAccessOrder(req, order)) {
         return res.status(403).json({
           success: false,
           message: "Forbidden.",
@@ -515,7 +511,7 @@ router.post(
       }
 
       if (["Cancelled", "Returned"].includes(String(order.status))) {
-        throw new Error("This order cannot accept payment.");
+        throw new PaymentError("This order cannot accept payment.", 409);
       }
 
       // Recheck admin status at payment creation, not only in /methods.
@@ -524,16 +520,16 @@ router.post(
       });
 
       if (!config?.isEnabled) {
-        throw new Error("The selected payment provider is disabled.");
+        throw new PaymentError("The selected payment provider is disabled.", 409);
       }
 
       const data = await createProviderPayment(orderId, provider);
 
       return res.status(201).json({ success: true, data });
     } catch (error) {
-      return res.status(400).json({
+      return res.status(paymentStatusCode(error)).json({
         success: false,
-        message: message(error),
+        message: paymentMessage(error),
       });
     }
   },
@@ -541,7 +537,7 @@ router.post(
 
 router.post(
   "/verify/razorpay",
-  auth,
+  paymentIdentity,
   async (req: AuthRequest, res: Response) => {
     try {
       const body = req.body ?? {};
@@ -563,7 +559,7 @@ router.post(
         typeof signature !== "string" ||
         !/^[a-fA-F0-9]{64}$/.test(signature)
       ) {
-        throw new Error("Invalid payment verification details.");
+        throw new PaymentError("Invalid payment verification details.");
       }
 
       const payment = await prisma.payment.findFirst({
@@ -585,7 +581,10 @@ router.post(
         });
       }
 
-      if (!ownsOrder(req, payment.order)) {
+      if (body.orderId !== undefined && positiveId(body.orderId) !== payment.orderId) {
+        throw new PaymentError("Payment does not belong to this order.", 403);
+      }
+      if (!canAccessOrder(req, payment.order)) {
         return res.status(403).json({
           success: false,
           message: "Forbidden.",
@@ -600,9 +599,9 @@ router.post(
 
       return res.json({ success: true, data });
     } catch (error) {
-      return res.status(400).json({
+      return res.status(paymentStatusCode(error)).json({
         success: false,
-        message: message(error),
+        message: paymentMessage(error),
       });
     }
   },
@@ -623,52 +622,13 @@ router.post(
       }
 
       const orderId = positiveId(body.orderId);
-      const amount = Number(body.amount);
-
-      if (!Number.isFinite(amount) || amount <= 0) {
-        throw new Error("Enter a valid positive payment amount.");
-      }
-
-      const order = await prisma.order.findUnique({
-        where: { id: orderId },
-      });
-
-      if (!order) throw new Error("Order not found.");
-
-      const status = body.status ?? "Paid";
-
-      // Validate against your generated Prisma enum values.
-      const paymentStatusType =
-        Prisma.PaymentScalarFieldEnum.paymentStatus;
-
-      // The field-name reference above does not validate enum values;
-      // preserve Prisma's runtime enum validation for this admin route.
-      void paymentStatusType;
-
-      const payment = await prisma.payment.create({
-        data: {
-          orderId,
-          amount: new Prisma.Decimal(amount),
-          currency: body.currency || order.currency || "INR",
-          provider,
-          paymentMethod: body.paymentMethod || undefined,
-          paymentStatus: status,
-          isCaptured: status === "Paid",
-          providerPaymentId: body.reference || null,
-          providerMeta: body.meta || undefined,
-        },
-      });
-
-      const updatedOrder = await syncOrderPayment(orderId);
-
-      return res.status(201).json({
-        success: true,
-        data: { payment, order: updatedOrder },
-      });
+      if (body.paymentMethod !== undefined && !Object.values(PaymentMethod).includes(body.paymentMethod)) throw new PaymentError("Invalid payment method.");
+      const result = await recordManualPayment({ orderId, amount: Number(body.amount), provider, reference: typeof body.reference === "string" ? body.reference : undefined, method: body.paymentMethod, status: body.status });
+      return res.status(201).json({ success: true, data: result });
     } catch (error) {
-      return res.status(400).json({
+      return res.status(paymentStatusCode(error)).json({
         success: false,
-        message: message(error),
+        message: paymentMessage(error),
       });
     }
   },
@@ -695,7 +655,7 @@ router.post(
       const amount = Number(req.body?.amount ?? payment.amount);
 
       if (!Number.isFinite(amount) || amount <= 0) {
-        throw new Error("Enter a valid refund amount.");
+        throw new PaymentError("Enter a valid refund amount.");
       }
 
       const data = await refundPayment(
@@ -703,16 +663,27 @@ router.post(
         amount,
         req.body?.reason,
         req.user?.userId,
+        req.get("Idempotency-Key"),
       );
 
       return res.status(201).json({ success: true, data });
     } catch (error) {
-      return res.status(400).json({
+      return res.status(paymentStatusCode(error)).json({
         success: false,
-        message: message(error),
+        message: paymentMessage(error),
       });
     }
   },
 );
 
+router.post("/order/:orderId/cancel", paymentIdentity, async (req: AuthRequest, res) => {
+  try {
+    const id = positiveId(req.params.orderId);
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order || !canAccessOrder(req, order)) return res.status(403).json({ success: false, message: "Order access denied." });
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : "Customer cancellation";
+    const data = await cancelOrder(id, reason, req.user?.role === "Admin");
+    return res.json({ success: true, data });
+  } catch (error) { return res.status(paymentStatusCode(error)).json({ success: false, message: paymentMessage(error) }); }
+});
 export default router;

@@ -1,3 +1,7 @@
+import {requestNdr} from '../services/shipping/ndr.service';
+import crypto from "crypto";
+import { recoverShadowfax, retrySavedShadowfax, shadowfaxBookingStatus } from "../services/shipping/shadowfaxBooking.service";
+import { shadowfaxErrorMessage } from '../services/shipping/shadowfaxError';
 import { Router, Response } from "express";
 import { Prisma, ShippingProvider } from "@prisma/client";
 import { z } from "zod";
@@ -64,89 +68,39 @@ router.post("/rates", async (req, res) => {
   }
 });
 
-// Shiprocket tracking webhook. Configure x-api-key to SHIPPING_WEBHOOK_SECRET.
-router.post("/webhooks/shiprocket", async (req, res) => {
-  try {
-    const secret = process.env.SHIPPING_WEBHOOK_SECRET;
-    if (secret && req.header("x-api-key") !== secret)
-      return res.status(401).json({ success: false });
-    const b: any = req.body || {};
-    const awb = String(b.awb || "");
-    if (!awb) return res.status(200).json({ success: true });
-    const s = await prisma.shipment.findFirst({ where: { awb } });
-    if (!s) return res.status(200).json({ success: true });
-    const raw = String(
-      b.current_status || b.shipment_status || "",
-    ).toLowerCase();
-    let status: any = s.status;
-    if (raw.includes("out for delivery")) status = "OutForDelivery";
-    else if (raw.includes("delivered") && !raw.includes("rto"))
-      status = "Delivered";
-    else if (raw.includes("rto") && raw.includes("deliver")) status = "RTO";
-    else if (raw.includes("rto")) status = "RTOInTransit";
-    else if (raw.includes("ndr") || raw.includes("undelivered")) status = "NDR";
-    else if (raw.includes("transit") || raw.includes("shipped"))
-      status = "InTransit";
-    else if (raw.includes("pick")) status = "Picked";
-    await prisma.shipment.update({
-      where: { id: s.id },
-      data: {
-        status,
-        providerMeta: b,
-        deliveredAt: status === "Delivered" ? new Date() : s.deliveredAt,
-      },
-    });
-    await prisma.shipmentTrackingEvent.create({
-      data: {
-        shipmentId: s.id,
-        status: String(b.current_status || b.shipment_status || status),
-        activity: b.activity || null,
-        location: b.location || null,
-        eventTime: b.current_timestamp
-          ? new Date(b.current_timestamp)
-          : new Date(),
-        providerCode: b.current_status_id ? String(b.current_status_id) : null,
-        raw: b,
-      },
-    });
-    await prisma.order.update({
-      where: { id: s.orderId },
-      data: {
-        shipmentStatus: status,
-        ...(status === "Delivered"
-          ? { status: "Delivered", deliveredAt: new Date() }
-          : {}),
-      },
-    });
-    if (status === "Delivered") {
-      const p = await prisma.payment.findFirst({
-        where: { orderId: s.orderId, provider: "COD" },
-        orderBy: { id: "desc" },
-      });
-      if (p)
-        await prisma.$transaction([
-          prisma.payment.update({
-            where: { id: p.id },
-            data: { paymentStatus: "Paid", isCaptured: true },
-          }),
-          prisma.order.update({
-            where: { id: s.orderId },
-            data: {
-              paymentStatus: "Paid",
-              paidAmount: p.amount,
-              paymentDue: new Prisma.Decimal(0),
-            },
-          }),
-        ]);
-    }
-    res.status(200).json({ success: true });
-  } catch (e) {
-    console.error("shipping webhook", e);
-    res.status(200).json({ success: true });
-  }
+// Callback signals a change; status is verified through authenticated carrier tracking.
+router.post('/webhooks/shiprocket',async(req,res)=>{const secret=process.env.SHIPPING_WEBHOOK_SECRET||'',provided=req.header('x-api-key')||'';if(secret.length<32||Buffer.byteLength(secret)!==Buffer.byteLength(provided)||!crypto.timingSafeEqual(Buffer.from(secret),Buffer.from(provided)))return res.status(401).json({success:false});const awb=z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).safeParse(req.body?.awb);if(!awb.success)return res.status(400).json({success:false});try{const s=await prisma.shipment.findFirst({where:{provider:'Shiprocket',awb:awb.data}});if(s)await trackShipment(s.id);return res.json({success:true})}catch{return res.status(503).json({success:false})}});
+
+// Configure this shared header with Shadowfax; never trust callback status as payment/shipping proof.
+router.post("/webhooks/shadowfax",async(req,res)=>{
+ const secret=process.env.SHADOWFAX_WEBHOOK_SECRET||'',provided=req.header('x-api-key')||'';
+ if(secret.length<32||Buffer.byteLength(secret)!==Buffer.byteLength(provided)||!crypto.timingSafeEqual(Buffer.from(secret),Buffer.from(provided)))return res.status(401).json({success:false});
+ const body=z.object({awb_number:z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),client_order_id:z.string().min(1).max(100)}).safeParse(req.body);
+ if(!body.success)return res.status(400).json({success:false});
+ try{
+  const shipment=await prisma.shipment.findFirst({where:{provider:'Shadowfax360',awb:body.data.awb_number}});
+  if(!shipment)return res.json({success:true});
+  const meta:any=shipment.providerMeta||{};
+  if(meta.clientOrderId!==body.data.client_order_id)return res.status(409).json({success:false});
+  const key=`shadowfax-sync:${shipment.id}`,value={requestedAt:new Date().toISOString()};
+  await prisma.storeSetting.upsert({where:{key},create:{key,value},update:{value}});
+  return res.json({success:true});
+ }catch{return res.status(503).json({success:false});}
 });
 
 router.use(auth);
+router.get('/shadowfax/orders/:orderId/booking',admin,async(req,res)=>{
+ try{const id=z.coerce.number().int().positive().parse(req.params.orderId);return res.json({success:true,data:await shadowfaxBookingStatus(id)});}catch(e){return res.status(400).json({success:false,message:shadowfaxErrorMessage(e)});}
+});
+router.post('/shadowfax/orders/:orderId/retry-saved',admin,async(req,res)=>{
+ try{const id=z.coerce.number().int().positive().parse(req.params.orderId);const expected=z.string().min(1).max(100).parse(req.body.expectedClientOrderId);return res.json({success:true,data:await retrySavedShadowfax(id,expected)});}catch(e){return res.status(409).json({success:false,message:shadowfaxErrorMessage(e)});}
+});
+router.post('/shadowfax/orders/:orderId/correct-pickup',admin,async(req,res)=>{
+ try{const id=z.coerce.number().int().positive().parse(req.params.orderId);const body=z.object({expectedClientOrderId:z.string().min(1).max(100),pickupLocationId:z.number().int().positive(),expectedErrorAt:z.string().datetime()}).parse(req.body);return res.json({success:true,data:await retrySavedShadowfax(id,body.expectedClientOrderId,{pickupLocationId:body.pickupLocationId,expectedErrorAt:body.expectedErrorAt})});}catch(e){return res.status(409).json({success:false,message:shadowfaxErrorMessage(e)});}
+});
+router.post("/shadowfax/orders/:orderId/recover",admin,async(req,res)=>{
+ try{const orderId=z.coerce.number().int().positive().parse(req.params.orderId);const awb=z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).parse(req.body.awb);return res.json({success:true,data:await recoverShadowfax(orderId,awb)});}catch(e){return res.status(409).json({success:false,message:shadowfaxErrorMessage(e)});}
+});
 router.get("/providers/catalog", admin, (_req, res) =>
   res.json({ success: true, data: SHIPPING_CATALOG }),
 );
@@ -157,7 +111,7 @@ router.put("/providers/:provider", admin, async (req: AuthRequest, res) => {
   try {
     res.json({
       success: true,
-      data: await saveProviderConfig(provider(req.params.provider), req.body),
+      data: await saveProviderConfig(provider(String(req.params.provider)), req.body),
     });
   } catch (e: any) {
     res.status(400).json({ success: false, message: e.message });
@@ -170,7 +124,7 @@ router.post(
     try {
       res.json({
         success: true,
-        ...(await testProvider(provider(req.params.provider))),
+        ...(await testProvider(provider(String(req.params.provider)))),
       });
     } catch (e: any) {
       res.status(400).json({ success: false, message: e.message });
@@ -182,7 +136,7 @@ router.patch(
   admin,
   async (req: AuthRequest, res) => {
     try {
-      const p = provider(req.params.provider);
+      const p = provider(String(req.params.provider));
       const x = await prisma.shippingProviderConfig.update({
         where: { provider: p },
         data: { isEnabled: !!req.body.isEnabled },
@@ -779,7 +733,7 @@ router.post("/shipments/:id/pickup", admin, async (req, res) => {
   try {
     res.json({
       success: true,
-      data: await schedulePickup(Number(req.params.id)),
+      data: await schedulePickup(Number(req.params.id),req.body),
     });
   } catch (e: any) {
     res.status(400).json({ success: false, message: e.message });
@@ -815,62 +769,6 @@ router.post("/shipments/:id/cancel", admin, async (req, res) => {
     res.status(400).json({ success: false, message: e.message });
   }
 });
-router.post(
-  "/shipments/:id/manual-status",
-  admin,
-  async (req: AuthRequest, res) => {
-    try {
-      const id = Number(req.params.id);
-      const status = req.body.status;
-      const s = await prisma.shipment.update({
-        where: { id },
-        data: {
-          status,
-          ...(status === "Delivered" ? { deliveredAt: new Date() } : {}),
-        },
-      });
-      await prisma.shipmentTrackingEvent.create({
-        data: {
-          shipmentId: id,
-          status,
-          activity: req.body.activity || "Manual status update",
-          location: req.body.location || null,
-          eventTime: new Date(),
-        },
-      });
-      await prisma.order.update({
-        where: { id: s.orderId },
-        data: {
-          shipmentStatus: status,
-          ...(status === "Delivered"
-            ? { status: "Delivered", deliveredAt: new Date() }
-            : {}),
-        },
-      });
-      res.json({ success: true, data: s });
-    } catch (e: any) {
-      res.status(400).json({ success: false, message: e.message });
-    }
-  },
-);
-router.post("/shipments/:id/ndr", admin, async (req: AuthRequest, res) => {
-  try {
-    const id = Number(req.params.id);
-    const a = await prisma.ndrAction.create({
-      data: {
-        shipmentId: id,
-        action: req.body.action || "REATTEMPT",
-        reason: req.body.reason || null,
-        requestedById: req.user?.userId,
-        providerMeta: req.body.meta || {},
-      },
-    });
-    await prisma.shipment.update({ where: { id }, data: { status: "NDR" } });
-    res.json({ success: true, data: a });
-  } catch (e: any) {
-    res.status(400).json({ success: false, message: e.message });
-  }
-});
+router.post('/shipments/:id/manual-status',admin,(_req,res)=>res.status(409).json({success:false,message:'Use local operations transitions. Carrier status requires authenticated tracking.'}));
+router.post('/shipments/:id/ndr',admin,async(req:AuthRequest,res)=>{try{return res.json({success:true,data:await requestNdr(z.coerce.number().int().positive().parse(req.params.id),req.body,req.user!.userId)})}catch(e:any){return res.status(400).json({success:false,message:e.message})}});
 export default router;
-+
-3

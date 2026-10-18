@@ -1,0 +1,21 @@
+process.env.JWT_SECRET='auth-account-test-secret';
+const assert=require('node:assert/strict'),express=require('express'),jwt=require('jsonwebtoken');
+let account={email:'admin@example.com',isActive:true,role:'Admin'},fail=false;
+const id=require.resolve('../dist/lib/prisma');
+require.cache[id]={id,filename:id,loaded:true,exports:{prisma:{user:{findUnique:async()=>{if(fail)throw Error('database unavailable');return account}}}}};
+const {auth}=require('../dist/middleware/auth'),{adminOnly}=require('../dist/middleware/admin'),{optionalAuth}=require('../dist/middleware/optionalAuth');
+const app=express();app.get('/admin',auth,adminOnly,(_q,r)=>r.json({success:true}));app.get('/optional',optionalAuth,(q,r)=>r.json({role:q.user?.role||'guest'}));
+(async()=>{const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const base=`http://127.0.0.1:${server.address().port}`;
+const token=jwt.sign({userId:1,role:'Admin'},process.env.JWT_SECRET),headers={Authorization:`Bearer ${token}`};let count=0;
+const check=async(path,status,h=headers)=>{assert.equal((await fetch(base+path,{headers:h})).status,status);count++};
+try{
+await check('/admin',401,{});await check('/admin',200);
+account.role='Customer';await check('/admin',403);
+assert.equal((await (await fetch(base+'/optional',{headers})).json()).role,'Customer');count++;
+account.isActive=false;await check('/admin',401);await check('/optional',401);
+account=null;await check('/admin',401);
+await check('/optional',200,{});await check('/optional',401,{Authorization:'Bearer bad'});
+await check('/admin',401,{Authorization:`Bearer ${jwt.sign({userId:'1',role:'Admin'},process.env.JWT_SECRET)}`});
+account={isActive:true,role:'Admin'};fail=true;await check('/admin',503);
+console.log(`${count} current-account authentication HTTP checks passed; database mocked.`);
+}finally{server.closeAllConnections();await new Promise(r=>server.close(r))}})().catch(e=>{console.error(e);process.exitCode=1});

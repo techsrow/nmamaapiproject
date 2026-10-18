@@ -6,7 +6,7 @@ export function buildInvoicePdf(order: any) {
   // Header
   doc.fontSize(18).text("INVOICE", { align: "right" });
   doc.moveDown(0.5);
-  doc.fontSize(10).text(`Invoice #: INV-${order.id}`);
+  doc.fontSize(10).text(`Invoice #: ${order.invoiceNumber || `INV-${order.id}`}`);
   doc.text(`Date: ${new Date(order.orderDate).toLocaleString()}`);
   doc.moveDown();
 
@@ -37,12 +37,15 @@ export function buildInvoicePdf(order: any) {
   doc.moveDown();
 
   // Totals
-  doc.fontSize(10).text(`Subtotal: ${Number(order.totalAmount).toFixed(2)}`, { align: "right" });
-  if (order.couponDiscount) {
-    doc.text(`Discount: -${Number(order.couponDiscount).toFixed(2)}`, { align: "right" });
+  doc.fontSize(10).text(`Subtotal: ${Number(order.subtotal ?? order.orderItems.reduce((s: number, i: any) => s + Number(i.unitPrice) * i.quantity, 0)).toFixed(2)}`, { align: "right" });
+  if (Number(order.discountAmount ?? order.couponDiscount) > 0) {
+    doc.text(`Discount: -${Number(order.discountAmount ?? order.couponDiscount).toFixed(2)}`, { align: "right" });
   }
   if (order.shippingFee) {
     doc.text(`Shipping: ${Number(order.shippingFee).toFixed(2)}`, { align: "right" });
+  }
+  if (Array.isArray(order.taxBreakdown)) for (const tax of order.taxBreakdown) {
+    doc.text(`${tax.name} ${tax.rate}% (${tax.inclusive ? "included" : "additional"}): ${Number(tax.taxAmount).toFixed(2)}`, {align:"right"});
   }
   doc.fontSize(12).text(`Total: ${Number(order.totalAmount).toFixed(2)}`, { align: "right" });
 

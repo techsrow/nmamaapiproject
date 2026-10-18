@@ -1,3 +1,5 @@
+import crypto from "crypto";
+import { changeStock } from "../services/inventory/stock.service";
 import { Router, Response } from "express";
 
 import { z } from "zod";
@@ -16,204 +18,90 @@ const db: any = prisma;
 
 const ok = (res: Response, data: any, status = 200) =>
 
-  res.status(status).json({ success: true, data });
+  res.status(status).json({ success: true, data });
 
 const fail = (res: Response, e: any, status = 400) =>
 
-  res
+  res
 
-    .status(status)
+    .status(status)
 
-    .json({
+    .json({
 
-      success: false,
+      success: false,
 
-      message: e?.issues?.[0]?.message || e?.message || "Request failed",
+      message: e?.issues?.[0]?.message || e?.message || "Request failed",
 
-    });
+    });
 
 const n = (v: any) => Number(v || 0);
 
 
 
-async function syncVariantTotal(tx: any, variantId: number) {
-
-  const a = await tx.warehouseInventory.aggregate({
-
-    where: { variantId },
-
-    _sum: { quantity: true, reserved: true },
-
-  });
-
-  const quantity = n(a._sum.quantity),
-
-    reserved = n(a._sum.reserved);
-
-  await tx.productVariant.update({
-
-    where: { id: variantId },
-
-    data: { stockQuantity: quantity },
-
-  });
-
-  return { quantity, reserved, available: quantity - reserved };
-
-}
-
-
-
-async function move(
-  tx: any,
-  args: {
-    variantId: number;
-    warehouseId: number;
-    type:
-      | "IN"
-      | "OUT"
-      | "ADJUSTMENT"
-      | "RESERVATION"
-      | "RELEASE"
-      | "SALE"
-      | "RETURN"
-      | "TRANSFER_IN"
-      | "TRANSFER_OUT";
-    delta: number;
-    referenceType?: string;
-    referenceId?: string;
-    note?: string;
-    userId?: number;
-  },
-) {
-  if (!Number.isInteger(args.delta) || args.delta === 0) {
-    throw new Error("Inventory movement delta must be a non-zero integer");
-  }
-
-  const row = await tx.warehouseInventory.upsert({
-    where: {
-      warehouseId_variantId: {
-        warehouseId: args.warehouseId,
-        variantId: args.variantId,
-      },
-    },
-    create: {
-      warehouseId: args.warehouseId,
-      variantId: args.variantId,
-      quantity: 0,
-      reserved: 0,
-    },
-    update: {},
-  });
-
-  const before = n(row.quantity);
-  const after = before + args.delta;
-
-  if (after < 0) {
-    throw new Error(
-      `Insufficient stock for variant ${args.variantId}. Available: ${before}, requested: ${Math.abs(args.delta)}`,
-    );
-  }
-
-  await tx.warehouseInventory.update({
-    where: {
-      warehouseId_variantId: {
-        warehouseId: args.warehouseId,
-        variantId: args.variantId,
-      },
-    },
-    data: { quantity: after },
-  });
-
-  await syncVariantTotal(tx, args.variantId);
-
-  await tx.inventoryMovement.create({
-    data: {
-      variantId: args.variantId,
-      warehouseId: args.warehouseId,
-      type: args.type,
-      quantity: Math.abs(args.delta),
-      beforeQty: before,
-      afterQty: after,
-      referenceType: args.referenceType ?? null,
-      referenceId: args.referenceId ?? null,
-      note: args.note ?? null,
-      ...(args.userId ? { createdById: args.userId } : {}),
-    },
-  });
-
-  return {
-    variantId: args.variantId,
-    warehouseId: args.warehouseId,
-    type: args.type,
-    quantity: Math.abs(args.delta),
-    delta: args.delta,
-    before,
-    after,
-  };
-}
+// Stock writes go through the shared balance and database ledger.
+const move = async (tx: any, args: any) => changeStock(tx, args);
 
 const variantInclude = {
 
-  product: {
+  product: {
 
-    select: {
+    select: {
 
-      id: true,
+      id: true,
 
-      name: true,
+      name: true,
 
-      slug: true,
+      slug: true,
 
-      imageUrl: true,
+      imageUrl: true,
 
-      images: { orderBy: { sortOrder: "asc" }, take: 1 },
+      images: { orderBy: { sortOrder: "asc" }, take: 1 },
 
-    },
+    },
 
-  },
+  },
 
-  images: { orderBy: { sortOrder: "asc" }, take: 1 },
+  images: { orderBy: { sortOrder: "asc" }, take: 1 },
 
 };
 
 const variantView = (v: any) => ({
 
-  ...v,
+  ...v,
 
-  displayName: [v.product?.name, v.color, v.size].filter(Boolean).join(" / "),
+  displayName: [v.product?.name, v.color, v.size].filter(Boolean).join(" / "),
 
-  imageUrl:
+  imageUrl:
 
-    v.images?.[0]?.url ||
+    v.images?.[0]?.url ||
 
-    v.colorImageUrl ||
+    v.colorImageUrl ||
 
-    v.product?.images?.[0]?.url ||
+    v.product?.images?.[0]?.url ||
 
-    v.product?.imageUrl ||
+    v.product?.imageUrl ||
 
-    null,
+    null,
 
-  inventoryStatus:
+  inventoryStatus:
 
-    v.stockQuantity <= 0
+    v.stockQuantity <= 0
 
-      ? v.preorderEnabled
+      ? v.preorderEnabled
 
-        ? "PREORDER"
+        ? "PREORDER"
 
-        : v.allowBackorder
+        : v.allowBackorder
 
-          ? "BACKORDER"
+          ? "BACKORDER"
 
-          : "OUT_OF_STOCK"
+          : "OUT_OF_STOCK"
 
-      : v.stockQuantity <= v.lowStockAlertAt
+      : v.stockQuantity <= v.lowStockAlertAt
 
-        ? "LOW_STOCK"
+        ? "LOW_STOCK"
 
-        : "IN_STOCK",
+        : "IN_STOCK",
 
 });
 
@@ -223,263 +111,263 @@ const variantView = (v: any) => ({
 
 router.get("/stock", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const q = String(req.query.q || "").trim();
+    const q = String(req.query.q || "").trim();
 
-    const variants = await db.productVariant.findMany({
+    const variants = await db.productVariant.findMany({
 
-      where: {
+      where: {
 
-        isActive: true,
+        isActive: true,
 
-        ...(q
+        ...(q
 
-          ? {
+          ? {
 
-              OR: [
+              OR: [
 
-                { sku: { contains: q, mode: "insensitive" } },
+                { sku: { contains: q, mode: "insensitive" } },
 
-                { color: { contains: q, mode: "insensitive" } },
+                { color: { contains: q, mode: "insensitive" } },
 
-                { size: { contains: q, mode: "insensitive" } },
+                { size: { contains: q, mode: "insensitive" } },
 
-                { product: { name: { contains: q, mode: "insensitive" } } },
+                { product: { name: { contains: q, mode: "insensitive" } } },
 
-              ],
+              ],
 
-            }
+            }
 
-          : {}),
+          : {}),
 
-      },
+      },
 
-      include: variantInclude,
+      include: variantInclude,
 
-      orderBy: [{ stockQuantity: "asc" }, { id: "desc" }],
+      orderBy: [{ stockQuantity: "asc" }, { id: "desc" }],
 
-      take: Math.min(n(req.query.limit) || 300, 500),
+      take: Math.min(n(req.query.limit) || 300, 500),
 
-    });
+    });
 
-    const ids = variants.map((v: any) => v.id);
+    const ids = variants.map((v: any) => v.id);
 
-    const inv = ids.length
+    const inv = ids.length
 
-      ? await db.warehouseInventory.findMany({
+      ? await db.warehouseInventory.findMany({
 
-          where: { variantId: { in: ids } },
+          where: { variantId: { in: ids } },
 
-          include: {
+          include: {
 
-            warehouse: {
+            warehouse: {
 
-              select: { id: true, name: true, code: true, isActive: true },
+              select: { id: true, name: true, code: true, isActive: true },
 
-            },
+            },
 
-          },
+          },
 
-        })
+        })
 
-      : [];
+      : [];
 
-    const by = new Map<number, any[]>();
+    const by = new Map<number, any[]>();
 
-    for (const x of inv) {
+    for (const x of inv) {
 
-      if (!by.has(x.variantId)) by.set(x.variantId, []);
+      if (!by.has(x.variantId)) by.set(x.variantId, []);
 
-      by.get(x.variantId)!.push({
+      by.get(x.variantId)!.push({
 
-        ...x,
+        ...x,
 
-        available: n(x.quantity) - n(x.reserved),
+        available: n(x.quantity) - n(x.reserved),
 
-      });
+      });
 
-    }
+    }
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      variants.map((v: any) => ({
+      variants.map((v: any) => ({
 
-        ...variantView(v),
+        ...variantView(v),
 
-        warehouses: by.get(v.id) || [],
+        warehouses: by.get(v.id) || [],
 
-        reserved: (by.get(v.id) || []).reduce(
+        reserved: (by.get(v.id) || []).reduce(
 
-          (s: number, x: any) => s + n(x.reserved),
+          (s: number, x: any) => s + n(x.reserved),
 
-          0,
+          0,
 
-        ),
+        ),
 
-        available: (by.get(v.id) || []).reduce(
+        available: (by.get(v.id) || []).reduce(
 
-          (s: number, x: any) => s + n(x.quantity) - n(x.reserved),
+          (s: number, x: any) => s + n(x.quantity) - n(x.reserved),
 
-          0,
+          0,
 
-        ),
+        ),
 
-      })),
+      })),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
 router.get("/low-stock", auth, adminOnly, async (_req, res) => {
 
-  try {
+  try {
 
-    const rows = await db.productVariant.findMany({
+    const rows = await db.productVariant.findMany({
 
-      where: { isActive: true, trackInventory: true },
+      where: { isActive: true, trackInventory: true },
 
-      include: variantInclude,
+      include: variantInclude,
 
-      orderBy: { stockQuantity: "asc" },
+      orderBy: { stockQuantity: "asc" },
 
-    });
+    });
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      rows
+      rows
 
-        .filter((v: any) => v.stockQuantity <= v.lowStockAlertAt)
+        .filter((v: any) => v.stockQuantity <= v.lowStockAlertAt)
 
-        .map(variantView),
+        .map(variantView),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
 router.patch("/variants/:id/settings", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({
+      .object({
 
-        lowStockAlertAt: z.coerce.number().int().nonnegative().optional(),
+        lowStockAlertAt: z.coerce.number().int().nonnegative().optional(),
 
-        trackInventory: z.boolean().optional(),
+        trackInventory: z.boolean().optional(),
 
-        allowBackorder: z.boolean().optional(),
+        allowBackorder: z.boolean().optional(),
 
-        preorderEnabled: z.boolean().optional(),
+        preorderEnabled: z.boolean().optional(),
 
-      })
+      })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.productVariant.update({
+      await db.productVariant.update({
 
-        where: { id: n(req.params.id) },
+        where: { id: n(req.params.id) },
 
-        data: b,
+        data: b,
 
-      }),
+      }),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.post("/:variantId/threshold", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({ lowStockAlertAt: z.coerce.number().int().nonnegative() })
+      .object({ lowStockAlertAt: z.coerce.number().int().nonnegative() })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.productVariant.update({
+      await db.productVariant.update({
 
-        where: { id: n(req.params.variantId) },
+        where: { id: n(req.params.variantId) },
 
-        data: b,
+        data: b,
 
-      }),
+      }),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.post("/adjust", auth, adminOnly, async (req: AuthRequest, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({
+      .object({
 
-        variantId: z.coerce.number().int().positive(),
+        variantId: z.coerce.number().int().positive(),
 
-        warehouseId: z.coerce.number().int().positive(),
+        warehouseId: z.coerce.number().int().positive(),
 
-        quantityDelta: z.coerce
+        quantityDelta: z.coerce
 
-          .number()
+          .number()
 
-          .int()
+          .int()
 
-          .refine((x) => x !== 0),
+          .refine((x) => x !== 0),
 
-        note: z.string().max(500).optional(),
+        note: z.string().max(500).optional(),
 
-      })
+      })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.$transaction((tx: any) =>
+      await db.$transaction((tx: any) =>
 
-       move(tx, {
+       move(tx, {
   variantId: b.variantId,
   warehouseId: b.warehouseId,
   delta: b.quantityDelta,
@@ -488,53 +376,53 @@ router.post("/adjust", auth, adminOnly, async (req: AuthRequest, res) => {
   userId: req.user!.userId,
 })
 
-      ),
+      ),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.get("/movements", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.inventoryMovement.findMany({
+      await db.inventoryMovement.findMany({
 
-        where: {
+        where: {
 
-          ...(req.query.variantId ? { variantId: n(req.query.variantId) } : {}),
+          ...(req.query.variantId ? { variantId: n(req.query.variantId) } : {}),
 
-          ...(req.query.warehouseId
+          ...(req.query.warehouseId
 
-            ? { warehouseId: n(req.query.warehouseId) }
+            ? { warehouseId: n(req.query.warehouseId) }
 
-            : {}),
+            : {}),
 
-        },
+        },
 
-        orderBy: { createdAt: "desc" },
+        orderBy: { createdAt: "desc" },
 
-        take: Math.min(n(req.query.limit) || 100, 500),
+        take: Math.min(n(req.query.limit) || 100, 500),
 
-      }),
+      }),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
@@ -544,53 +432,53 @@ router.get("/movements", auth, adminOnly, async (req, res) => {
 
 router.get("/variants", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const q = String(req.query.q || "").trim();
+    const q = String(req.query.q || "").trim();
 
-    const rows = await db.productVariant.findMany({
+    const rows = await db.productVariant.findMany({
 
-      where: {
+      where: {
 
-        isActive: true,
+        isActive: true,
 
-        ...(q
+        ...(q
 
-          ? {
+          ? {
 
-              OR: [
+              OR: [
 
-                { sku: { contains: q, mode: "insensitive" } },
+                { sku: { contains: q, mode: "insensitive" } },
 
-                { product: { name: { contains: q, mode: "insensitive" } } },
+                { product: { name: { contains: q, mode: "insensitive" } } },
 
-                { color: { contains: q, mode: "insensitive" } },
+                { color: { contains: q, mode: "insensitive" } },
 
-                { size: { contains: q, mode: "insensitive" } },
+                { size: { contains: q, mode: "insensitive" } },
 
-              ],
+              ],
 
-            }
+            }
 
-          : {}),
+          : {}),
 
-      },
+      },
 
-      include: variantInclude,
+      include: variantInclude,
 
-      orderBy: { id: "desc" },
+      orderBy: { id: "desc" },
 
-      take: Math.min(n(req.query.limit) || 100, 200),
+      take: Math.min(n(req.query.limit) || 100, 200),
 
-    });
+    });
 
-    return ok(res, rows.map(variantView));
+    return ok(res, rows.map(variantView));
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
@@ -600,197 +488,197 @@ router.get("/variants", auth, adminOnly, async (req, res) => {
 
 router.get("/warehouses", auth, adminOnly, async (_req, res) => {
 
-  try {
+  try {
 
-    return ok(res, await db.warehouse.findMany({ orderBy: { name: "asc" } }));
+    return ok(res, await db.warehouse.findMany({ orderBy: { name: "asc" } }));
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
 router.post("/warehouses", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({
+      .object({
 
-        name: z.string().trim().min(1),
+        name: z.string().trim().min(1),
 
-        code: z
+        code: z
 
-          .string()
+          .string()
 
-          .trim()
+          .trim()
 
-          .min(1)
+          .min(1)
 
-          .transform((x) => x.toUpperCase()),
+          .transform((x) => x.toUpperCase()),
 
-        address: z.any().optional(),
+        address: z.any().optional(),
 
-        isActive: z.boolean().default(true),
+        isActive: z.boolean().default(true),
 
-      })
+      })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    return ok(res, await db.warehouse.create({ data: b }), 201);
+    return ok(res, await db.warehouse.create({ data: b }), 201);
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.patch("/warehouses/:id", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({
+      .object({
 
-        name: z.string().trim().min(1).optional(),
+        name: z.string().trim().min(1).optional(),
 
-        code: z
+        code: z
 
-          .string()
+          .string()
 
-          .trim()
+          .trim()
 
-          .min(1)
+          .min(1)
 
-          .transform((x) => x.toUpperCase())
+          .transform((x) => x.toUpperCase())
 
-          .optional(),
+          .optional(),
 
-        address: z.any().optional(),
+        address: z.any().optional(),
 
-        isActive: z.boolean().optional(),
+        isActive: z.boolean().optional(),
 
-      })
+      })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.warehouse.update({ where: { id: n(req.params.id) }, data: b }),
+      await db.warehouse.update({ where: { id: n(req.params.id) }, data: b }),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.delete("/warehouses/:id", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const id = n(req.params.id);
+    const id = n(req.params.id);
 
-    const [inv, from, to] = await Promise.all([
+    const [inv, from, to] = await Promise.all([
 
-      db.warehouseInventory.count({
+      db.warehouseInventory.count({
 
-        where: {
+        where: {
 
-          warehouseId: id,
+          warehouseId: id,
 
-          OR: [{ quantity: { not: 0 } }, { reserved: { not: 0 } }],
+          OR: [{ quantity: { not: 0 } }, { reserved: { not: 0 } }],
 
-        },
+        },
 
-      }),
+      }),
 
-      db.stockTransfer.count({ where: { fromWarehouseId: id } }),
+      db.stockTransfer.count({ where: { fromWarehouseId: id } }),
 
-      db.stockTransfer.count({ where: { toWarehouseId: id } }),
+      db.stockTransfer.count({ where: { toWarehouseId: id } }),
 
-    ]);
+    ]);
 
-    if (inv || from || to)
+    if (inv || from || to)
 
-      throw new Error(
+      throw new Error(
 
-        "Warehouse has inventory or transfer history. Disable it instead of deleting it.",
+        "Warehouse has inventory or transfer history. Disable it instead of deleting it.",
 
-      );
+      );
 
-    await db.warehouse.delete({ where: { id } });
+    await db.warehouse.delete({ where: { id } });
 
-    return ok(res, { deleted: true });
+    return ok(res, { deleted: true });
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.get("/warehouses/:id/stock", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const rows = await db.warehouseInventory.findMany({
+    const rows = await db.warehouseInventory.findMany({
 
-      where: { warehouseId: n(req.params.id) },
+      where: { warehouseId: n(req.params.id) },
 
-      orderBy: { quantity: "asc" },
+      orderBy: { quantity: "asc" },
 
-    });
+    });
 
-    const ids = rows.map((x: any) => x.variantId);
+    const ids = rows.map((x: any) => x.variantId);
 
-    const vars = ids.length
+    const vars = ids.length
 
-      ? await db.productVariant.findMany({
+      ? await db.productVariant.findMany({
 
-          where: { id: { in: ids } },
+          where: { id: { in: ids } },
 
-          include: variantInclude,
+          include: variantInclude,
 
-        })
+        })
 
-      : [];
+      : [];
 
-    const m = new Map(vars.map((v: any) => [v.id, variantView(v)]));
+    const m = new Map(vars.map((v: any) => [v.id, variantView(v)]));
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      rows.map((x: any) => ({
+      rows.map((x: any) => ({
 
-        ...x,
+        ...x,
 
-        available: n(x.quantity) - n(x.reserved),
+        available: n(x.quantity) - n(x.reserved),
 
-        variant: m.get(x.variantId),
+        variant: m.get(x.variantId),
 
-      })),
+      })),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
@@ -800,133 +688,133 @@ router.get("/warehouses/:id/stock", auth, adminOnly, async (req, res) => {
 
 router.get("/suppliers", auth, adminOnly, async (_req, res) => {
 
-  try {
+  try {
 
-    return ok(res, await db.supplier.findMany({ orderBy: { name: "asc" } }));
+    return ok(res, await db.supplier.findMany({ orderBy: { name: "asc" } }));
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
 router.post("/suppliers", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({
+      .object({
 
-        name: z.string().trim().min(1),
+        name: z.string().trim().min(1),
 
-        email: z
+        email: z
 
-          .union([z.string().email(), z.literal("")])
+          .union([z.string().email(), z.literal("")])
 
-          .nullable()
+          .nullable()
 
-          .optional(),
+          .optional(),
 
-        phone: z.string().nullable().optional(),
+        phone: z.string().nullable().optional(),
 
-        gstin: z.string().nullable().optional(),
+        gstin: z.string().nullable().optional(),
 
-        address: z.any().optional(),
+        address: z.any().optional(),
 
-      })
+      })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.supplier.create({ data: { ...b, email: b.email || null } }),
+      await db.supplier.create({ data: { ...b, email: b.email || null } }),
 
-      201,
+      201,
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.patch("/suppliers/:id", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({
+      .object({
 
-        name: z.string().trim().min(1).optional(),
+        name: z.string().trim().min(1).optional(),
 
-        email: z
+        email: z
 
-          .union([z.string().email(), z.literal("")])
+          .union([z.string().email(), z.literal("")])
 
-          .nullable()
+          .nullable()
 
-          .optional(),
+          .optional(),
 
-        phone: z.string().nullable().optional(),
+        phone: z.string().nullable().optional(),
 
-        gstin: z.string().nullable().optional(),
+        gstin: z.string().nullable().optional(),
 
-        address: z.any().optional(),
+        address: z.any().optional(),
 
-      })
+      })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.supplier.update({
+      await db.supplier.update({
 
-        where: { id: n(req.params.id) },
+        where: { id: n(req.params.id) },
 
-        data: { ...b, ...("email" in b ? { email: b.email || null } : {}) },
+        data: { ...b, ...("email" in b ? { email: b.email || null } : {}) },
 
-      }),
+      }),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.delete("/suppliers/:id", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const id = n(req.params.id);
+    const id = n(req.params.id);
 
-    if (await db.purchaseOrder.count({ where: { supplierId: id } }))
+    if (await db.purchaseOrder.count({ where: { supplierId: id } }))
 
-      throw new Error("Supplier has purchase orders and cannot be deleted");
+      throw new Error("Supplier has purchase orders and cannot be deleted");
 
-    await db.supplier.delete({ where: { id } });
+    await db.supplier.delete({ where: { id } });
 
-    return ok(res, { deleted: true });
+    return ok(res, { deleted: true });
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
@@ -936,335 +824,345 @@ router.delete("/suppliers/:id", auth, adminOnly, async (req, res) => {
 
 const poItem = z.object({
 
-  variantId: z.coerce.number().int().positive(),
+  variantId: z.coerce.number().int().positive(),
 
-  quantity: z.coerce.number().int().positive(),
+  quantity: z.coerce.number().int().positive(),
 
-  unitCost: z.coerce.number().nonnegative().default(0),
+  unitCost: z.coerce.number().nonnegative().default(0),
 
 });
 
 router.get("/purchase-orders", auth, adminOnly, async (_req, res) => {
 
-  try {
+  try {
 
-    const rows = await db.purchaseOrder.findMany({
+    const rows = await db.purchaseOrder.findMany({
 
-      orderBy: { createdAt: "desc" },
+      orderBy: { createdAt: "desc" },
 
-      include: { supplier: true },
+      include: { supplier: true },
 
-    });
+    });
 
-    const ids = [
+    const ids = [
 
-      ...new Set(
+      ...new Set(
 
-        rows.flatMap((x: any) =>
+        rows.flatMap((x: any) =>
 
-          (x.items || []).map((i: any) => n(i.variantId)),
+          (x.items || []).map((i: any) => n(i.variantId)),
 
-        ),
+        ),
 
-      ),
+      ),
 
-    ];
+    ];
 
-    const vars = ids.length
+    const vars = ids.length
 
-      ? await db.productVariant.findMany({
+      ? await db.productVariant.findMany({
 
-          where: { id: { in: ids } },
+          where: { id: { in: ids } },
 
-          include: variantInclude,
+          include: variantInclude,
 
-        })
+        })
 
-      : [];
+      : [];
 
-    const vm = new Map(vars.map((v: any) => [v.id, variantView(v)]));
+    const vm = new Map(vars.map((v: any) => [v.id, variantView(v)]));
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      rows.map((po: any) => ({
+      rows.map((po: any) => ({
 
-        ...po,
+        ...po,
 
-        items: (po.items || []).map((i: any) => ({
+        items: (po.items || []).map((i: any) => ({
 
-          ...i,
+          ...i,
 
-          variant: vm.get(n(i.variantId)) || null,
+          variant: vm.get(n(i.variantId)) || null,
 
-        })),
+        })),
 
-      })),
+      })),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
 router.post("/purchase-orders", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({
+      .object({
 
-        supplierId: z.coerce.number().int().positive(),
+        supplierId: z.coerce.number().int().positive(),
 
-        warehouseId: z.coerce.number().int().positive().optional(),
+        warehouseId: z.coerce.number().int().positive().optional(),
 
-        items: z.array(poItem).min(1),
+        items: z.array(poItem).min(1),
 
-        expectedAt: z.coerce.date().nullable().optional(),
+        expectedAt: z.coerce.date().nullable().optional(),
 
-        notes: z.string().max(1000).optional(),
+        notes: z.string().max(1000).optional(),
 
-      })
+      })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    const items = b.items.map((i) => ({
+    const items = b.items.map((i) => ({
 
-      ...i,
+      ...i,
 
-      receivedQuantity: 0,
+      receivedQuantity: 0,
 
-      ...(b.warehouseId ? { warehouseId: b.warehouseId } : {}),
+      ...(b.warehouseId ? { warehouseId: b.warehouseId } : {}),
 
-      ...(b.notes ? { notes: b.notes } : {}),
+      ...(b.notes ? { notes: b.notes } : {}),
 
-    }));
+    }));
 
-    const total = items.reduce((s, i) => s + i.quantity * i.unitCost, 0);
+    const total = items.reduce((s, i) => s + i.quantity * i.unitCost, 0);
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.purchaseOrder.create({
+      await db.purchaseOrder.create({
 
-        data: {
+        data: {
 
-          supplierId: b.supplierId,
+          supplierId: b.supplierId,
 
-          items,
+          items,
 
-          total,
+          total,
 
-          expectedAt: b.expectedAt,
+          expectedAt: b.expectedAt,
 
-          status: "DRAFT",
+          status: "DRAFT",
 
-        },
+        },
 
-      }),
+      }),
 
-      201,
+      201,
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.patch(
 
-  "/purchase-orders/:id/status",
+  "/purchase-orders/:id/status",
 
-  auth,
+  auth,
 
-  adminOnly,
+  adminOnly,
 
-  async (req, res) => {
+  async (req, res) => {
 
-    try {
+    try {
 
-      const id = n(req.params.id),
+      const id = n(req.params.id),
 
-        { status } = z
+        { status } = z
 
-          .object({ status: z.enum(["DRAFT", "ORDERED", "CANCELLED"]) })
+          .object({ status: z.enum(["DRAFT", "ORDERED", "CANCELLED"]) })
 
-          .parse(req.body);
+          .parse(req.body);
 
-      const po = await db.purchaseOrder.findUnique({ where: { id } });
+      const po = await db.purchaseOrder.findUnique({ where: { id } });
 
-      if (!po) throw new Error("Purchase order not found");
+      if (!po) throw new Error("Purchase order not found");
 
-      if (["RECEIVED", "CANCELLED"].includes(po.status))
+      if (["RECEIVED", "CANCELLED"].includes(po.status))
 
-        throw new Error("Closed purchase order cannot be changed");
+        throw new Error("Closed purchase order cannot be changed");
 
-      return ok(
+      return ok(
 
-        res,
+        res,
 
-        await db.purchaseOrder.update({ where: { id }, data: { status } }),
+        await db.purchaseOrder.update({ where: { id }, data: { status } }),
 
-      );
+      );
 
-    } catch (e) {
+    } catch (e) {
 
-      return fail(res, e);
+      return fail(res, e);
 
-    }
+    }
 
-  },
+  },
 
 );
 
 router.post(
 
-  "/purchase-orders/:id/receive",
+  "/purchase-orders/:id/receive",
 
-  auth,
+  auth,
 
-  adminOnly,
+  adminOnly,
 
-  async (req: AuthRequest, res) => {
+  async (req: AuthRequest, res) => {
 
-    try {
+    try {
 
-      const id = n(req.params.id),
+      const id = n(req.params.id),
 
-        b = z
+        b = z
 
-          .object({
+          .object({
 
-            warehouseId: z.coerce.number().int().positive(),
+            warehouseId: z.coerce.number().int().positive(),
 
-            items: z
+            items: z
 
-              .array(
+              .array(
 
-                z.object({
+                z.object({
 
-                  variantId: z.coerce.number().int().positive(),
+                  variantId: z.coerce.number().int().positive(),
 
-                  quantity: z.coerce.number().int().positive(),
+                  quantity: z.coerce.number().int().positive(),
 
-                }),
+                }),
 
-              )
+              )
 
-              .min(1),
+              .min(1),
 
-          })
+          })
 
-          .parse(req.body);
+          .parse(req.body);
 
-      const result = await db.$transaction(async (tx: any) => {
+      const requestKey = z.string().uuid().parse(req.header("Idempotency-Key"));
+      const receiptKey = `inventory-receive:${req.user!.userId}:${id}:${requestKey}`;
+      const fingerprint = crypto.createHash("sha256").update(JSON.stringify(b)).digest("hex");
+      const result = await db.$transaction(async (tx: any) => {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${receiptKey},0))::text`;
+        const receipt = await tx.storeSetting.findUnique({where:{key:receiptKey}});
+        if(receipt){if(receipt.value.fingerprint!==fingerprint)throw new Error("Receipt key already used for another delivery.");return receipt.value.result;}
 
-        const po = await tx.purchaseOrder.findUnique({ where: { id } });
 
-        if (!po) throw new Error("Purchase order not found");
+        await tx.$queryRaw`SELECT id FROM "PurchaseOrder" WHERE id = ${id} FOR UPDATE`;
+        const po = await tx.purchaseOrder.findUnique({ where: { id } });
 
-        if (po.status === "CANCELLED")
+        if (!po) throw new Error("Purchase order not found");
 
-          throw new Error("Purchase order is cancelled");
+        if (po.status === "CANCELLED")
 
-        if (po.status === "RECEIVED")
+          throw new Error("Purchase order is cancelled");
 
-          throw new Error("Purchase order is already fully received");
+        if (po.status === "RECEIVED")
 
-        const ordered: any[] = (po.items || []) as any[];
+          throw new Error("Purchase order is already fully received");
 
-        for (const r of b.items) {
+        const ordered: any[] = (po.items || []) as any[];
 
-          const o = ordered.find((x) => n(x.variantId) === r.variantId);
+        for (const r of b.items) {
 
-          if (!o)
+          const o = ordered.find((x) => n(x.variantId) === r.variantId);
 
-            throw new Error(
+          if (!o)
 
-              `Variant ${r.variantId} is not on this purchase order`,
+            throw new Error(
 
-            );
+              `Variant ${r.variantId} is not on this purchase order`,
 
-          const received = n(o.receivedQuantity);
+            );
 
-          if (received + r.quantity > n(o.quantity))
+          const received = n(o.receivedQuantity);
 
-            throw new Error(
+          if (received + r.quantity > n(o.quantity))
 
-              `Received quantity exceeds ordered quantity for variant ${r.variantId}`,
+            throw new Error(
 
-            );
+              `Received quantity exceeds ordered quantity for variant ${r.variantId}`,
 
-          await move(tx, {
+            );
 
-            variantId: r.variantId,
+          await move(tx, {
 
-            warehouseId: b.warehouseId,
+            variantId: r.variantId,
 
-            type: "IN",
+            warehouseId: b.warehouseId,
 
-            delta: r.quantity,
+            type: "IN",
 
-            referenceType: "PURCHASE_ORDER",
+            delta: r.quantity,
 
-            referenceId: String(id),
+            referenceType: "PURCHASE_ORDER",
 
-            userId: req.user!.userId,
+            referenceId: String(id),
 
-          });
+            userId: req.user!.userId,
 
-          o.receivedQuantity = received + r.quantity;
+          });
 
-          o.lastReceivedWarehouseId = b.warehouseId;
+          o.receivedQuantity = received + r.quantity;
 
-        }
+          o.lastReceivedWarehouseId = b.warehouseId;
 
-        const complete = ordered.every(
+        }
 
-          (x) => n(x.receivedQuantity) >= n(x.quantity),
+        const complete = ordered.every(
 
-        );
+          (x) => n(x.receivedQuantity) >= n(x.quantity),
 
-        const any = ordered.some((x) => n(x.receivedQuantity) > 0);
+        );
 
-        return tx.purchaseOrder.update({
+        const any = ordered.some((x) => n(x.receivedQuantity) > 0);
 
-          where: { id },
+        const updated = await tx.purchaseOrder.update({
 
-          data: {
+          where: { id },
 
-            items: ordered,
+          data: {
 
-            status: complete ? "RECEIVED" : any ? "PARTIAL" : po.status,
+            items: ordered,
 
-            receivedAt: complete ? new Date() : null,
+            status: complete ? "RECEIVED" : any ? "PARTIAL" : po.status,
 
-          },
+            receivedAt: complete ? new Date() : null,
 
-        });
+          },
 
-      });
+        });
 
-      return ok(res, result);
+        await tx.storeSetting.create({data:{key:receiptKey,value:JSON.parse(JSON.stringify({fingerprint,result:updated}))}});
+        return updated;
+      });
 
-    } catch (e) {
+      return ok(res, result);
 
-      return fail(res, e);
+    } catch (e) {
 
-    }
+      return fail(res, e);
 
-  },
+    }
+
+  },
 
 );
 
@@ -1274,273 +1172,274 @@ router.post(
 
 const transferItem = z.object({
 
-  variantId: z.coerce.number().int().positive(),
+  variantId: z.coerce.number().int().positive(),
 
-  quantity: z.coerce.number().int().positive(),
+  quantity: z.coerce.number().int().positive(),
 
 });
 
 router.get("/transfers", auth, adminOnly, async (_req, res) => {
 
-  try {
+  try {
 
-    const rows = await db.stockTransfer.findMany({
+    const rows = await db.stockTransfer.findMany({
 
-      orderBy: { createdAt: "desc" },
+      orderBy: { createdAt: "desc" },
 
-      include: { fromWarehouse: true, toWarehouse: true },
+      include: { fromWarehouse: true, toWarehouse: true },
 
-    });
+    });
 
-    const ids = [
+    const ids = [
 
-      ...new Set(
+      ...new Set(
 
-        rows.flatMap((x: any) =>
+        rows.flatMap((x: any) =>
 
-          (x.items || []).map((i: any) => n(i.variantId)),
+          (x.items || []).map((i: any) => n(i.variantId)),
 
-        ),
+        ),
 
-      ),
+      ),
 
-    ];
+    ];
 
-    const vars = ids.length
+    const vars = ids.length
 
-      ? await db.productVariant.findMany({
+      ? await db.productVariant.findMany({
 
-          where: { id: { in: ids } },
+          where: { id: { in: ids } },
 
-          include: variantInclude,
+          include: variantInclude,
 
-        })
+        })
 
-      : [];
+      : [];
 
-    const vm = new Map(vars.map((v: any) => [v.id, variantView(v)]));
+    const vm = new Map(vars.map((v: any) => [v.id, variantView(v)]));
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      rows.map((t: any) => ({
+      rows.map((t: any) => ({
 
-        ...t,
+        ...t,
 
-        items: (t.items || []).map((i: any) => ({
+        items: (t.items || []).map((i: any) => ({
 
-          ...i,
+          ...i,
 
-          variant: vm.get(n(i.variantId)) || null,
+          variant: vm.get(n(i.variantId)) || null,
 
-        })),
+        })),
 
-      })),
+      })),
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e, 500);
+    return fail(res, e, 500);
 
-  }
+  }
 
 });
 
 router.post("/transfers", auth, adminOnly, async (req, res) => {
 
-  try {
+  try {
 
-    const b = z
+    const b = z
 
-      .object({
+      .object({
 
-        fromWarehouseId: z.coerce.number().int().positive(),
+        fromWarehouseId: z.coerce.number().int().positive(),
 
-        toWarehouseId: z.coerce.number().int().positive(),
+        toWarehouseId: z.coerce.number().int().positive(),
 
-        items: z.array(transferItem).min(1),
+        items: z.array(transferItem).min(1),
 
-        notes: z.string().max(1000).optional(),
+        notes: z.string().max(1000).optional(),
 
-      })
+      })
 
-      .parse(req.body);
+      .parse(req.body);
 
-    if (b.fromWarehouseId === b.toWarehouseId)
+    if (b.fromWarehouseId === b.toWarehouseId)
 
-      throw new Error("Source and destination warehouses must differ");
+      throw new Error("Source and destination warehouses must differ");
 
-    return ok(
+    return ok(
 
-      res,
+      res,
 
-      await db.stockTransfer.create({
+      await db.stockTransfer.create({
 
-        data: { ...b, items: b.items, status: "DRAFT" },
+        data: { ...b, items: b.items, status: "DRAFT" },
 
-      }),
+      }),
 
-      201,
+      201,
 
-    );
+    );
 
-  } catch (e) {
+  } catch (e) {
 
-    return fail(res, e);
+    return fail(res, e);
 
-  }
+  }
 
 });
 
 router.patch(
 
-  "/transfers/:id/status",
+  "/transfers/:id/status",
 
-  auth,
+  auth,
 
-  adminOnly,
+  adminOnly,
 
-  async (req: AuthRequest, res) => {
+  async (req: AuthRequest, res) => {
 
-    try {
+    try {
 
-      const id = n(req.params.id),
+      const id = n(req.params.id),
 
-        { status } = z
+        { status } = z
 
-          .object({ status: z.enum(["IN_TRANSIT", "COMPLETED", "CANCELLED"]) })
+          .object({ status: z.enum(["IN_TRANSIT", "COMPLETED", "CANCELLED"]) })
 
-          .parse(req.body);
+          .parse(req.body);
 
-      const result = await db.$transaction(async (tx: any) => {
+      const result = await db.$transaction(async (tx: any) => {
 
-        const t = await tx.stockTransfer.findUnique({ where: { id } });
+        await tx.$queryRaw`SELECT id FROM "StockTransfer" WHERE id = ${id} FOR UPDATE`;
+        const t = await tx.stockTransfer.findUnique({ where: { id } });
 
-        if (!t) throw new Error("Transfer not found");
+        if (!t) throw new Error("Transfer not found");
 
-        if (["COMPLETED", "CANCELLED"].includes(t.status))
+        if (["COMPLETED", "CANCELLED"].includes(t.status))
 
-          throw new Error("Transfer is already closed");
+          throw new Error("Transfer is already closed");
 
-        const items: any[] = t.items as any[];
+        const items: any[] = t.items as any[];
 
-        if (status === "IN_TRANSIT") {
+        if (status === "IN_TRANSIT") {
 
-          if (t.status !== "DRAFT")
+          if (t.status !== "DRAFT")
 
-            throw new Error("Only draft transfers can be dispatched");
+            throw new Error("Only draft transfers can be dispatched");
 
-          for (const i of items)
+          for (const i of items)
 
-            await move(tx, {
+            await move(tx, {
 
-              variantId: n(i.variantId),
+              variantId: n(i.variantId),
 
-              warehouseId: t.fromWarehouseId,
+              warehouseId: t.fromWarehouseId,
 
-              type: "TRANSFER_OUT",
+              type: "TRANSFER_OUT",
 
-              delta: -n(i.quantity),
+              delta: -n(i.quantity),
 
-              referenceType: "STOCK_TRANSFER",
+              referenceType: "STOCK_TRANSFER",
 
-              referenceId: String(id),
+              referenceId: String(id),
 
-              note: "Transfer dispatched",
+              note: "Transfer dispatched",
 
-              userId: req.user!.userId,
+              userId: req.user!.userId,
 
-            });
+            });
 
-        }
+        }
 
-        if (status === "COMPLETED") {
+        if (status === "COMPLETED") {
 
-          if (t.status !== "IN_TRANSIT")
+          if (t.status !== "IN_TRANSIT")
 
-            throw new Error(
+            throw new Error(
 
-              "Transfer must be in transit before it can be received",
+              "Transfer must be in transit before it can be received",
 
-            );
+            );
 
-          for (const i of items)
+          for (const i of items)
 
-            await move(tx, {
+            await move(tx, {
 
-              variantId: n(i.variantId),
+              variantId: n(i.variantId),
 
-              warehouseId: t.toWarehouseId,
+              warehouseId: t.toWarehouseId,
 
-              type: "TRANSFER_IN",
+              type: "TRANSFER_IN",
 
-              delta: n(i.quantity),
+              delta: n(i.quantity),
 
-              referenceType: "STOCK_TRANSFER",
+              referenceType: "STOCK_TRANSFER",
 
-              referenceId: String(id),
+              referenceId: String(id),
 
-              note: "Transfer received",
+              note: "Transfer received",
 
-              userId: req.user!.userId,
+              userId: req.user!.userId,
 
-            });
+            });
 
-        }
+        }
 
-        if (status === "CANCELLED" && t.status === "IN_TRANSIT") {
+        if (status === "CANCELLED" && t.status === "IN_TRANSIT") {
 
-          for (const i of items)
+          for (const i of items)
 
-            await move(tx, {
+            await move(tx, {
 
-              variantId: n(i.variantId),
+              variantId: n(i.variantId),
 
-              warehouseId: t.fromWarehouseId,
+              warehouseId: t.fromWarehouseId,
 
-              type: "IN",
+              type: "IN",
 
-              delta: n(i.quantity),
+              delta: n(i.quantity),
 
-              referenceType: "STOCK_TRANSFER",
+              referenceType: "STOCK_TRANSFER",
 
-              referenceId: String(id),
+              referenceId: String(id),
 
-              note: "In-transit transfer cancelled",
+              note: "In-transit transfer cancelled",
 
-              userId: req.user!.userId,
+              userId: req.user!.userId,
 
-            });
+            });
 
-        }
+        }
 
-        return tx.stockTransfer.update({
+        return tx.stockTransfer.update({
 
-          where: { id },
+          where: { id },
 
-          data: {
+          data: {
 
-            status,
+            status,
 
-            completedAt: status === "COMPLETED" ? new Date() : null,
+            completedAt: status === "COMPLETED" ? new Date() : null,
 
-          },
+          },
 
-        });
+        });
 
-      });
+      });
 
-      return ok(res, result);
+      return ok(res, result);
 
-    } catch (e) {
+    } catch (e) {
 
-      return fail(res, e);
+      return fail(res, e);
 
-    }
+    }
 
-  },
+  },
 
 );
 

@@ -58,6 +58,8 @@ router.get("/", async (req: Request, res: Response) => {
       include: {
         category: { select: { id: true, name: true, slug: true } },
         subCategory: { select: { id: true, name: true, slug: true } },
+        productTags: { include: { tag: { select: { id: true, name: true, slug: true } } } },
+        brand: { select: { id: true, name: true, slug: true, isActive: true } },
 
         images: {
           orderBy: [{ isMain: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
@@ -156,6 +158,7 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
       include: {
         category: { select: { id: true, name: true, slug: true } },
         subCategory: { select: { id: true, name: true, slug: true } },
+        brand: { select: { id: true, name: true, slug: true, isActive: true } },
 
         images: {
           orderBy: [{ isMain: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
@@ -276,6 +279,7 @@ router.get("/related/:slug", async (req: Request, res: Response) => {
         include: {
           category: { select: { id: true, name: true, slug: true } },
           subCategory: { select: { id: true, name: true, slug: true } },
+        brand: { select: { id: true, name: true, slug: true, isActive: true } },
           images: {
             orderBy: [{ isMain: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
             select: { id: true, url: true, altText: true, isMain: true, sortOrder: true },
@@ -414,6 +418,7 @@ router.get("/:id", async (req: Request, res: Response) => {
       include: {
         category: { select: { id: true, name: true, slug: true } },
         subCategory: { select: { id: true, name: true, slug: true } },
+        brand: { select: { id: true, name: true, slug: true, isActive: true } },
 
         images: {
           orderBy: [{ isMain: "desc" }, { sortOrder: "asc" }, { id: "asc" }],

@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 
 interface TaxItem { hsnSac?: string | null; lineTotal: number }
@@ -7,8 +8,8 @@ function cents(value: number): number {
     return result;
 }
 function normalize(value?: string | null) { return String(value ?? "").trim().toUpperCase(); }
-export async function calculateCheckoutTax(input: { country: string; region: string; discount: number; items: TaxItem[] }) {
-    const rules = await prisma.taxRule.findMany({ where: { isActive: true }, orderBy: { id: "asc" } });
+export async function calculateCheckoutTax(input: { country: string; region: string; discount: number; items: TaxItem[] }, db: Pick<Prisma.TransactionClient, "taxRule"> = prisma) {
+    const rules = await db.taxRule.findMany({ where: { isActive: true }, orderBy: { id: "asc" } });
     const totals = input.items.map((item) => cents(item.lineTotal));
     const subtotal = totals.reduce((sum, value) => sum + value, 0);
     const discount = cents(input.discount);

@@ -13,6 +13,13 @@ import {
 
 export const SHIPPING_CATALOG = [
   {
+    provider: "Shadowfax360",
+    name: "Shadowfax 360",
+    kind: "DIRECT",
+    fields: ["token"],
+    capabilities: { rulePricing: true, tracking: true, automaticBooking: false },
+  },
+  {
     provider: "Shiprocket",
     name: "Shiprocket",
     kind: "AGGREGATOR",
@@ -219,7 +226,8 @@ export async function saveProviderConfig(
 ========================================================= */
 
 export async function credentialsFor(
-  provider: ShippingProvider
+  provider: ShippingProvider,
+  existingShipment = false
 ) {
   const config =
     await prisma.shippingProviderConfig.findUnique({
@@ -234,7 +242,7 @@ export async function credentialsFor(
     );
   }
 
-  if (!config.isEnabled) {
+  if (!config.isEnabled && !existingShipment) {
     throw new Error(
       `${getProviderDisplayName(provider)} is not enabled`
     );
@@ -288,6 +296,11 @@ export async function testProvider(
       );
     }
 
+    if (provider === "Shadowfax360") {
+      const { testShadowfax } = await import("./shadowfax.service");
+      const result = await testShadowfax();
+      return await record(provider, result.ok, result.message);
+    }
     const { credentials } =
       await credentialsFor(provider);
 

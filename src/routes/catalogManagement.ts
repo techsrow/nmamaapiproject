@@ -39,12 +39,19 @@ function ruleToWhere(rule:Rule):any{
   default: return {};
  }
 }
-async function collectionProducts(c:any, take=48){
- if(c.type==='MANUAL') return db.collectionProduct.findMany({where:{collectionId:c.id,product:{isActive:true}},orderBy:{position:'asc'},take,include:{product:{include:{brand:true,images:{take:1,orderBy:{sortOrder:'asc'}},variants:{where:{isActive:true}}}}}}).then((x:any[])=>x.map(x=>x.product));
- const r:any=c.rules||{}; const rules:Array<Rule>=Array.isArray(r.rules)?r.rules:[]; const mode=r.match==='ANY'?'OR':'AND'; const clauses=rules.map(ruleToWhere).filter(x=>Object.keys(x).length); const where:any={isActive:true}; if(clauses.length) where[mode]=clauses; return db.product.findMany({where,orderBy:c.isFeatured?[{isFeatured:'desc'},{updatedAt:'desc'}]:{updatedAt:'desc'},take,include:{brand:true,images:{take:1,orderBy:{sortOrder:'asc'}},variants:{where:{isActive:true}}}});
+async function collectionProducts(c:any, take=48, skip=0){
+ if(c.type==='MANUAL') return db.collectionProduct.findMany({where:{collectionId:c.id,product:{isActive:true}},orderBy:[{position:'asc'},{productId:'asc'}],take,skip,include:{product:{include:{category:true,subCategory:true,productTags:{include:{tag:true}},brand:true,images:{take:1,orderBy:{sortOrder:'asc'}},variants:{where:{isActive:true}}}}}}).then((x:any[])=>x.map(x=>x.product));
+ const r:any=c.rules||{}; const rules:Array<Rule>=Array.isArray(r.rules)?r.rules:[]; const mode=r.match==='ANY'?'OR':'AND'; const clauses=rules.map(ruleToWhere).filter(x=>Object.keys(x).length); const where:any={isActive:true}; if(clauses.length) where[mode]=clauses; return db.product.findMany({where,orderBy:c.isFeatured?[{isFeatured:'desc'},{updatedAt:'desc'},{id:'desc'}]:[{updatedAt:'desc'},{id:'desc'}],take,skip,include:{category:true,subCategory:true,productTags:{include:{tag:true}},brand:true,images:{take:1,orderBy:{sortOrder:'asc'}},variants:{where:{isActive:true}}}});
 }
 router.get('/collections',async(req,res)=>{try{const now=new Date(); const rows=await db.collection.findMany({where:{isActive:true,AND:[{OR:[{startsAt:null},{startsAt:{lte:now}}]},{OR:[{endsAt:null},{endsAt:{gte:now}}]}]},orderBy:[{isFeatured:'desc'},{updatedAt:'desc'}]}); return ok(res,rows);}catch(e){return fail(res,e,500)}});
-router.get('/collections/:slug',async(req,res)=>{try{const c=await db.collection.findUnique({where:{slug:String(req.params.slug)}}); if(!c||!c.isActive)return fail(res,new Error('Collection not found'),404); const now=new Date(); if((c.startsAt&&c.startsAt>now)||(c.endsAt&&c.endsAt<now))return fail(res,new Error('Collection is not currently available'),404); return ok(res,{...c,products:await collectionProducts(c,Math.min(Number(req.query.limit)||48,100))});}catch(e){return fail(res,e,500)}});
+router.get('/collections/:slug',async(req,res)=>{try{
+ const c=await db.collection.findUnique({where:{slug:String(req.params.slug)}}); if(!c||!c.isActive)return fail(res,new Error('Collection not found'),404);
+ const now=new Date();if((c.startsAt&&c.startsAt>now)||(c.endsAt&&c.endsAt<now))return fail(res,new Error('Collection is not currently available'),404);
+ const page=z.coerce.number().int().min(1).max(51).parse(req.query.page||1),limit=z.coerce.number().int().min(1).max(100).parse(req.query.limit||48);
+ const products=await collectionProducts(c,limit,(page-1)*limit);
+ return ok(res,{...c,products,pagination:{page,limit,hasMore:products.length===limit}});
+}catch(e){return fail(res,e,500)}});
+
 const collectionSchema=z.object({name:z.string().min(1),slug:z.string().optional(),description:z.string().nullable().optional(),imageUrl:z.string().nullable().optional(),type:z.enum(['MANUAL','AUTOMATIC','SEASONAL']).default('MANUAL'),rules:z.any().optional(),isFeatured:z.boolean().default(false),startsAt:z.coerce.date().nullable().optional(),endsAt:z.coerce.date().nullable().optional(),isActive:z.boolean().default(true)});
 router.post('/admin/collections',auth,adminOnly,async(req,res)=>{try{const b=collectionSchema.parse(req.body); return ok(res,await db.collection.create({data:{...b,slug:await uniqueSlug(db.collection,b.slug||b.name)}}),201);}catch(e){return fail(res,e)}});
 router.patch('/admin/collections/:id',auth,adminOnly,async(req,res)=>{try{const id=Number(req.params.id), b=collectionSchema.partial().parse(req.body); const data:any={...b}; if(b.slug||b.name)data.slug=await uniqueSlug(db.collection,b.slug||b.name!,id); return ok(res,await db.collection.update({where:{id},data}));}catch(e){return fail(res,e)}});

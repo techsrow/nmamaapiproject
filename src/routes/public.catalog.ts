@@ -158,7 +158,7 @@ router.get("/categories", async (req: Request, res: Response) => {
 ========================================================= */
 router.get("/categories/:slug", async (req: Request, res: Response) => {
   try {
-    const slug = req.params.slug;
+    const slug = String(req.params.slug);
     const include = parseInclude(req.query.include);
     const includeCounts = toBool(req.query.includeCounts) === true;
     const isActive = toBool(req.query.isActive); // optional filter for nested subcategories
@@ -292,7 +292,7 @@ router.get("/subcategories", async (req: Request, res: Response) => {
 ========================================================= */
 router.get("/subcategories/:slug", async (req: Request, res: Response) => {
   try {
-    const slug = req.params.slug;
+    const slug = String(req.params.slug);
     const includeCounts = toBool(req.query.includeCounts) === true;
 
     const item = await prisma.subCategory.findFirst({
@@ -397,7 +397,7 @@ router.get("/tags", async (req: Request, res: Response) => {
 
 router.get("/tags/:slug", async (req: Request, res: Response) => {
   try {
-    const slug = req.params.slug;
+    const slug = String(req.params.slug);
     const includeCounts = toBool(req.query.includeCounts) === true;
 
     const item = await prisma.tag.findFirst({

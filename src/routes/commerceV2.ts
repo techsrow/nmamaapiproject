@@ -60,6 +60,6 @@ router.get("/support/tickets",auth,async(req:AuthRequest,res)=>{try{return ok(re
 
 // Store settings power integrations, tracking/ads, localization, consent, notifications.
 router.get("/settings/public",async(_req,res)=>{try{const rows=await db.storeSetting.findMany({where:{key:{in:["store","localization","tracking","consent","checkout","shipping"]}}}); return ok(res,Object.fromEntries(rows.map((x:any)=>[x.key,x.value])))}catch(e){return fail(res,e)}});
-router.put("/admin/settings/:key",auth,adminOnly,async(req,res)=>{try{return ok(res,await db.storeSetting.upsert({where:{key:req.params.key},update:{value:req.body},create:{key:req.params.key,value:req.body}}))}catch(e){return fail(res,e)}});
+router.put("/admin/settings/:key",auth,adminOnly,async(req,res)=>{try{if(/^(checkout-order:|checkout-lifecycle:|payment-stock:|inventory-receive:|pos-draft:|shadowfax-sync|shadowfax-booking:)/.test(String(req.params.key)))return res.status(400).json({success:false,message:"Reserved internal setting key"});return ok(res,await db.storeSetting.upsert({where:{key:req.params.key},update:{value:req.body},create:{key:req.params.key,value:req.body}}))}catch(e){return fail(res,e)}});
 
 export default router;

@@ -67,6 +67,9 @@ export function groupVariantsByColor(variants: any[] = []) {
       effectivePrice: getEffectivePrice(v),
 
       stockQuantity: v.stockQuantity,
+      trackInventory: v.trackInventory,
+      allowBackorder: v.allowBackorder,
+      preorderEnabled: v.preorderEnabled,
       sku: v.sku,
 
       images: safeImages,
@@ -134,6 +137,9 @@ export function mapProductListItem(
     productType: p.productType,
     isActive: p.isActive,
 
+    createdAt: p.createdAt,
+    brand: p.brand,
+    productTags: p.productTags,
     category: p.category,
     subCategory: p.subCategory,
 
@@ -178,6 +184,9 @@ export function mapProductDetail(
     productType: p.productType,
     isActive: p.isActive,
 
+    createdAt: p.createdAt,
+    brand: p.brand,
+    productTags: p.productTags,
     category: p.category,
     subCategory: p.subCategory,
 

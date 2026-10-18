@@ -1,3 +1,4 @@
+import { stockContext, clearStockContext } from "../services/inventory/stock.service";
 import { Router } from "express";
 import type { Request } from "express";
 import { z } from "zod";
@@ -5,11 +6,14 @@ import axios from "axios";
 import { prisma } from "../lib/prisma";
 import { optionalAuth } from "../middleware/optionalAuth";
 import { validateAndComputeCoupon } from "../services/coupon.service";
-import { getShippingRates } from "../services/shipping/rate.service";
+import { getShippingRates, getConfiguredRuleRates } from "../services/shipping/rate.service";
 import { calculateCheckoutTax } from "../services/checkoutTax.service";
 import crypto from "crypto";
 import { PaymentMethod, PaymentProvider, Prisma } from "@prisma/client";
 import { issueGuestOrderAccess } from "../services/payments/orderAccess";
+import { assertPaymentAdapter } from "../services/payments/paymentService";
+import { PaymentError } from "../services/payments/paymentError";
+import { lifecycleKey, reservationHours, finalizeCheckout } from "../services/payments/orderLifecycle";
 const router = Router();
 type CheckoutRequest = Request & {
   user?: { userId: number };
@@ -70,6 +74,7 @@ const addressSchema = z.object({
 const checkoutSchema = z
   .object({
     cartToken: tokenSchema.optional(),
+    expectedCustomerId: z.number().int().positive().nullable().optional(),
     email: z.string().trim().email().optional(),
     shippingAddress: addressSchema,
     billingSameAsShipping: z.boolean().default(true),
@@ -319,41 +324,48 @@ async function prepareQuote(req: CheckoutRequest) {
       "Payment provider and payment method do not match.",
     );
   }
-  const pickup = await prisma.pickupLocation.findFirst({
-    where: { isActive: true },
-    orderBy: [{ isDefault: "desc" }, { id: "asc" }],
-  });
-  if (!pickup?.pincode) {
-    throw new CheckoutError(
-      "No active pickup location is configured.",
-    );
-  }
-  const weightKg = computedItems.reduce(
-    (sum, item) => sum + item.weightKg,
-    0,
-  );
-  const rates = await getShippingRates({
-    pickupPincode: pickup.pincode,
+  const weightKg = computedItems.reduce((sum, item) => sum + item.weightKg, 0);
+  // Shipping rules are independent of pickup locations, carrier credentials and dimensions.
+  let rates = await getConfiguredRuleRates({
     deliveryPincode: body.shippingAddress.postalCode,
-    cod: paymentMethod === "COD",
-    // Preserve the existing rule basis: subtotal before coupon.
-    declaredValue: subtotal,
-    package: {
-      weightKg,
-      lengthCm: configuredPositiveNumber(
-        "SHIPPING_PACKAGE_LENGTH_CM",
-        "SHIPROCKET_PACKAGE_LENGTH",
-      ),
-      widthCm: configuredPositiveNumber(
-        "SHIPPING_PACKAGE_WIDTH_CM",
-        "SHIPROCKET_PACKAGE_BREADTH",
-      ),
-      heightCm: configuredPositiveNumber(
-        "SHIPPING_PACKAGE_HEIGHT_CM",
-        "SHIPROCKET_PACKAGE_HEIGHT",
-      ),
-    },
+    country: body.shippingAddress.country, region: body.shippingAddress.state,
+    declaredValue: subtotal, cod: paymentMethod === "COD", weightKg,
   });
+  if (!rates.length) {
+    const pickup = await prisma.pickupLocation.findFirst({
+      where: { isActive: true },
+      orderBy: [{ isDefault: "desc" }, { id: "asc" }],
+    });
+    if (!pickup?.pincode) {
+      throw new CheckoutError(
+        "No active pickup location is configured.",
+      );
+    }
+    rates = await getShippingRates({
+      pickupPincode: pickup.pincode,
+      deliveryPincode: body.shippingAddress.postalCode,
+      country: body.shippingAddress.country,
+      region: body.shippingAddress.state,
+      cod: paymentMethod === "COD",
+      // Preserve the existing rule basis: subtotal before coupon.
+      declaredValue: subtotal,
+      package: {
+        weightKg,
+        lengthCm: configuredPositiveNumber(
+          "SHIPPING_PACKAGE_LENGTH_CM",
+          "SHIPROCKET_PACKAGE_LENGTH",
+        ),
+        widthCm: configuredPositiveNumber(
+          "SHIPPING_PACKAGE_WIDTH_CM",
+          "SHIPROCKET_PACKAGE_BREADTH",
+        ),
+        heightCm: configuredPositiveNumber(
+          "SHIPPING_PACKAGE_HEIGHT_CM",
+          "SHIPROCKET_PACKAGE_HEIGHT",
+        ),
+      },
+    });
+  }
   const shippingOptions = rates
     .filter(
       (rate) =>
@@ -382,9 +394,7 @@ async function prepareQuote(req: CheckoutRequest) {
     ? shippingOptions.find(
       (option) => option.id === body.deliveryOption,
     )
-    : shippingOptions.length === 1
-      ? shippingOptions[0]
-      : undefined;
+    : shippingOptions[0];
   if (body.deliveryOption && !selectedShipping) {
     throw new CheckoutError(
       "Please select an available delivery option.",
@@ -407,6 +417,7 @@ async function prepareQuote(req: CheckoutRequest) {
       );
   return {
     customerType: req.user ? "ACCOUNT" : "GUEST",
+    customerId: req.user?.userId ?? null,
     items: computedItems.map((item) => ({
       variantId: item.variantId,
       quantity: item.quantity,
@@ -477,10 +488,33 @@ router.post("/delivery-options", async (req, res) => {
     });
   }
 });
+// Renew access only for an existing, identical attempt. This endpoint never creates an order.
+router.post("/recover-order", async (request, res) => {
+  const req = request as CheckoutRequest;
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const body = checkoutSchema.parse(req.body);
+    const id = z.number().int().positive().parse(req.body.orderId);
+    const key = z.string().uuid().parse(req.get("Idempotency-Key"));
+    const email = z.string().trim().email().parse(body.email);
+    const guestToken = req.user ? null : tokenSchema.parse(body.cartToken || req.get("x-cart-token"));
+    const principal = req.user ? `account:${req.user.userId}` : `guest:${guestToken}`;
+    const storageKey = "checkout-order:" + crypto.createHash("sha256").update(`${principal}:${key}`).digest("hex");
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ ...body, email, cartToken: undefined })).digest("hex");
+    const saved = await prisma.storeSetting.findUnique({ where: { key: storageKey } });
+    const record = saved?.value as { orderId?: number; fingerprint?: string } | undefined;
+    if (!record || record.orderId !== id || record.fingerprint !== fingerprint) return res.status(403).json({ success: false, message: "Unable to recover this checkout. Contact the store." });
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order || (req.user ? order.userId !== req.user.userId : order.userId !== null)) return res.status(403).json({ success: false, message: "Unable to recover this checkout. Contact the store." });
+    return res.json({ success: true, data: { orderId: id, orderAccessToken: req.user ? null : issueGuestOrderAccess(id) } });
+  } catch { return res.status(400).json({ success: false, message: "Unable to recover this checkout. Contact the store." }); }
+});
+
 router.post("/place-order", async (request, res) => {
   const req = request as CheckoutRequest;
   try {
     const body = checkoutSchema.parse(req.body);
+    if (body.expectedCustomerId !== undefined && body.expectedCustomerId !== (req.user?.userId ?? null)) return res.status(409).json({success:false,message:body.expectedCustomerId===null?"Sign out to resume this saved guest checkout. Resolve its order status before starting another checkout.":"Sign in to the original account to resume this saved checkout. Resolve its order status before starting another checkout."});
     const key = z.string().uuid().parse(req.get("Idempotency-Key"));
     const email = z.string().trim().email().parse(body.email);
     const guestToken = req.user ? null : tokenSchema.parse(body.cartToken || req.get("x-cart-token"));
@@ -511,12 +545,13 @@ router.post("/place-order", async (request, res) => {
     }
     const expectedTotal = z.number().finite().nonnegative().parse(req.body.expectedTotal);
     if (Math.round(expectedTotal * 100) !== Math.round(quote.total * 100)) {
-      return res.status(409).json({ success: false, message: "Your total changed. Refresh the quote before placing the order." });
+      return res.status(409).json({ success: false, orderCreated: false, message: "Your total changed. Refresh the quote before placing the order." });
     }
     const total = quote.total;
     const shippingCharge = quote.shippingCharge;
     const selectedShipping = quote.selectedShipping;
     const provider = z.nativeEnum(PaymentProvider).parse(quote.paymentProvider);
+    assertPaymentAdapter(provider);
     const order = await prisma.$transaction(async (tx) => {
       if (await tx.storeSetting.findUnique({ where: { key: storageKey } })) throw new CheckoutError("This request is already processing. Retry with the same request key.");
       const gateway = await tx.paymentGatewayConfig.findUnique({ where: { provider } });
@@ -528,15 +563,19 @@ router.post("/place-order", async (request, res) => {
         ? await tx.cartItem.findMany({ where: { userId: req.user.userId }, include })
         : await tx.guestCartItem.findMany({ where: { cartId: guestCart!.id }, include });
       if (!cartItems.length || cartItems.length !== quote.items.length) throw new CheckoutError("Your bag changed. Refresh the quote.");
-      for (const item of cartItems) {
+      const reservations: { variantId: number; quantity: number }[] = [];
+      for (const item of cartItems.sort((a, b) => a.variantId - b.variantId)) {
         const quoted = quote.items.find((row) => row.variantId === item.variantId);
         const variant = item.variant;
         if (!quoted || quoted.quantity !== item.quantity || !variant.isActive || !variant.product.isActive || Math.round(quoted.unitPrice * 100) !== Math.round(Number(variant.discountPrice ?? variant.price) * 100)) {
           throw new CheckoutError("Your bag changed. Refresh the quote.");
         }
         if (variant.trackInventory && !variant.allowBackorder && !variant.preorderEnabled) {
+          await stockContext(tx, { type: "RESERVATION", referenceType: "WEB_CHECKOUT", referenceId: storageKey, userId: req.user?.userId });
           const reserved = await tx.productVariant.updateMany({ where: { id: variant.id, stockQuantity: { gte: item.quantity } }, data: { stockQuantity: { decrement: item.quantity } } });
+          await clearStockContext(tx);
           if (reserved.count !== 1) throw new CheckoutError("An item no longer has sufficient stock.");
+          reservations.push({ variantId: variant.id, quantity: item.quantity });
         }
       }
       const coupon = quote.couponCode ? await tx.coupon.findUnique({ where: { code: quote.couponCode } }) : null;
@@ -544,8 +583,8 @@ router.post("/place-order", async (request, res) => {
       if (coupon) {
         const now = new Date();
         if (!coupon.isActive || (coupon.startAt && now < coupon.startAt) || (coupon.endAt && now > coupon.endAt)) throw new CheckoutError("The coupon is no longer available.");
-        if (req.user && coupon.usagePerUser !== null) {
-          const used = await tx.order.count({ where: { userId: req.user.userId, couponId: coupon.id, status: { not: "Cancelled" } } });
+        if (coupon.usagePerUser !== null) {
+          const used = await tx.order.count({ where: { ...(req.user ? { userId: req.user.userId } : { customerEmail: { equals: email, mode: "insensitive" } }), couponId: coupon.id, status: { not: "Cancelled" } } });
           if (used >= coupon.usagePerUser) throw new CheckoutError("Coupon usage limit per user reached.");
         }
         const claimed = await tx.coupon.updateMany({ where: { id: coupon.id, isActive: true, ...(coupon.usageLimit === null ? {} : { usedCount: { lt: coupon.usageLimit } }) }, data: { usedCount: { increment: 1 } } });
@@ -569,6 +608,17 @@ router.post("/place-order", async (request, res) => {
         }
       });
       await tx.storeSetting.create({ data: { key: storageKey, value: { orderId: created.id, fingerprint, provider } } });
+      await tx.storeSetting.create({ data: { key: lifecycleKey(created.id), value: {
+        stockReference: storageKey, reservations, couponId: coupon?.id ?? null, userId: req.user?.userId ?? null,
+        guestCartId: guestCart?.id ?? null,
+        cartItems: cartItems.map(item => ({ id: item.id, quantity: item.quantity, updatedAt: item.updatedAt.toISOString() })),
+        finalized: false, released: false,
+        expiresAt: new Date(Date.now() + reservationHours() * 3600000).toISOString(),
+      } } });
+      if (total === 0) {
+        await tx.order.update({ where: { id: created.id }, data: { paymentStatus: "Paid", status: "Confirmed" } });
+        await finalizeCheckout(tx, created.id);
+      }
       return created;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 5000, timeout: 15000 });
     return res.status(201).json({ success: true, data: responseFor(order, provider, false) });
@@ -577,7 +627,8 @@ router.post("/place-order", async (request, res) => {
       return res.status(409).json({ success: false, message: "Checkout is being updated. Retry with the same request key." });
     }
     logFailure(error);
-    return res.status(400).json({ success: false, message: errorResponse(error) });
+    const rejected = error instanceof CheckoutError || error instanceof z.ZodError || error instanceof PaymentError;
+    return res.status(rejected ? 400 : 503).json({ success: false, ...(rejected ? { orderCreated: false } : {}), message: errorResponse(error) });
   }
 });
 export default router;
