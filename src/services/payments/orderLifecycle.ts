@@ -55,7 +55,7 @@ export async function cancelReservedOrder(orderId: number, reason: string, admin
       if (!admin && (Number(order.paidAmount) > 0 || order.payments.some(p => p.isCaptured))) throw new PaymentError("Payment was received for this cancelled order. Contact the store for a refund.", 409);
       await releaseCheckout(tx, orderId); return order;
     }
-    for(const key of [`shadowfax-booking:${orderId}`,`shiprocket-booking:${orderId}`])if(await tx.storeSetting.findUnique({where:{key}}))throw new PaymentError('Reconcile existing carrier booking before cancelling this order.',409);
+    for(const key of [`shadowfax-booking:${orderId}`,`shiprocket-booking:${orderId}`,`delhivery-booking:${orderId}`])if(await tx.storeSetting.findUnique({where:{key}}))throw new PaymentError('Reconcile existing carrier booking before cancelling this order.',409);
     if (!["Pending", "Confirmed"].includes(order.status)) throw new PaymentError("This order can no longer be cancelled.", 409);
     if (!admin && (Number(order.paidAmount) > 0 || order.payments.some(p => p.isCaptured))) throw new PaymentError("Contact the store to cancel a paid order.", 409);
     // The caller reconciles online payments first. Unknown remote creation cannot be assumed unpaid.

@@ -1,3 +1,4 @@
+import { downloadLabelPdf } from '../services/shipping/labelPdf.service';
 import {requestNdr} from '../services/shipping/ndr.service';
 import crypto from "crypto";
 import { recoverShadowfax, retrySavedShadowfax, shadowfaxBookingStatus } from "../services/shipping/shadowfaxBooking.service";
@@ -681,6 +682,7 @@ router.get("/shipments", admin, async (req, res) => {
   const status = req.query.status ? String(req.query.status) : undefined;
   const q = req.query.q ? String(req.query.q) : undefined;
   const where: any = {};
+  if(req.query.orderId){const id=Number(req.query.orderId);if(!Number.isSafeInteger(id)||id<=0)return res.status(400).json({success:false,message:"Invalid order ID"});where.orderId=id;}
   if (status) where.status = status;
   if (q)
     where.OR = [
@@ -747,6 +749,19 @@ router.post("/shipments/:id/label", admin, async (req, res) => {
     });
   } catch (e: any) {
     res.status(400).json({ success: false, message: e.message });
+  }
+});
+// Generate only a label for the existing booking, never a new shipment.
+router.post('/shipments/:id/label-pdf', admin, async (req, res) => {
+  let labelUrl:string|undefined;
+  try {
+    const id=z.coerce.number().int().positive().parse(req.params.id);
+    const shipment=await generateLabel(id);
+    labelUrl=shipment.labelUrl||undefined;
+    const pdf=await downloadLabelPdf(shipment.labelUrl!);
+    res.set({'Content-Type':'application/pdf','Content-Disposition':`inline; filename="shipping-label-${id}.pdf"`,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}).send(pdf);
+  } catch(e:any) {
+    res.status(400).json({success:false,labelUrl,message:typeof e?.response?.data?.message==='string'?e.response.data.message:e.message||'Unable to generate the carrier label PDF.'});
   }
 });
 router.post("/shipments/:id/track", admin, async (req, res) => {

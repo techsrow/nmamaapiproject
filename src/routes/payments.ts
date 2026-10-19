@@ -1,3 +1,4 @@
+import { checkoutImplemented } from '../services/payments/providerRegistry';
 import { Router, type Response } from "express";
 import { PaymentProvider, PaymentStatus, PaymentMethod, Prisma } from "@prisma/client";
 
@@ -121,6 +122,7 @@ router.get("/providers/catalog", ...admin, (_req, res) => {
     data: Object.entries(PROVIDERS).map(([provider, definition]) => ({
       provider,
       ...definition,
+      checkoutImplemented: checkoutImplemented(provider),
     })),
   });
 });
@@ -171,6 +173,7 @@ router.put("/providers/:provider", ...admin, async (req, res) => {
   try {
     const provider = parseProvider(req.params.provider);
     const body = req.body ?? {};
+    if(body.isEnabled===true&&!checkoutImplemented(provider)) throw new Error(`${provider} checkout integration is not implemented. Save configuration with this provider disabled.`);
 
     if (
       body.isEnabled !== undefined &&
@@ -334,6 +337,8 @@ router.patch(
       if (typeof req.body?.isEnabled !== "boolean") {
         throw new Error("isEnabled must be a boolean.");
       }
+
+      if(req.body.isEnabled&&!checkoutImplemented(provider)) throw new Error(`${provider} checkout integration is not implemented. Keep this provider disabled.`);
 
       const row = await prisma.paymentGatewayConfig.update({
         where: { provider },

@@ -17,6 +17,9 @@ export const PROVIDERS: Record<string, { label:string; currencies:string[]; requ
   Manual: { label:"Manual Payment", currencies:["INR"], required:[], online:false },
 };
 
+export const CHECKOUT_PROVIDERS = ['Razorpay','COD','BankTransfer','Manual'];
+export const checkoutImplemented = (provider:string) => CHECKOUT_PROVIDERS.includes(provider);
+
 export async function gateway(provider: PaymentProvider | string) {
   const row = await prisma.paymentGatewayConfig.findUnique({ where: { provider: provider as PaymentProvider } });
   if (!row || !row.isEnabled) throw new Error(`${provider} payment provider is not enabled`);
@@ -26,6 +29,7 @@ export async function gateway(provider: PaymentProvider | string) {
 export async function testGateway(provider: PaymentProvider | string, credentials: Record<string,string>, mode="TEST") {
   const meta = PROVIDERS[String(provider)];
   if (!meta) throw new Error("Unsupported payment provider");
+  if (!checkoutImplemented(String(provider))) throw new Error(`${meta.label} checkout integration is not implemented. Configuration can be saved, but this provider cannot be enabled or verified yet.`);
   const missing = meta.required.filter(k => !credentials?.[k]);
   if (missing.length) throw new Error(`Missing credentials: ${missing.join(", ")}`);
   if (!meta.online) return { ok:true, message:`${meta.label} is ready` };

@@ -19,5 +19,7 @@ order.orderItems[0].fulfilledQuantity=1;await assert.rejects(w.enqueueOrder(2),/
 job={...job,state:'RUNNING',leaseToken:'lease'};cfg.enabled=false;await w.processJob(job);assert.equal(updates.at(-1).data.state,'BLOCKED');assert.equal(updates.at(-1).where.leaseToken,'lease');
 cfg.notifications=true;process.env.SMTP_HOST='mock';process.env.MAIL_FROM='mock@example.com';await w.processJob({...job,kind:'EMAIL',payload:{to:'x',text:'text',subject:'s'}});assert.equal(mailCalls,1);assert.equal(updates.at(-1).data.state,'REVIEW');
 await w.expireLeases();assert.equal(updates.at(-1).data.state,'REVIEW');assert.equal(updates.at(-1).data.leaseToken,null);
-console.log('11 shipping workflow guards passed; database, carrier and SMTP mocked.');
+cfg.notifications=false;await w.processJob({...job,kind:'EMAIL',payload:{to:'x',text:'text',subject:'s',manual:true}});assert.equal(mailCalls,2);assert.equal(updates.at(-1).data.state,'REVIEW');
+assert.equal(w.automationSchema.safeParse({enabled:false,notifications:true,providers:['Shadowfax360'],allowFallback:false,pickupLocationId:0,weightKg:0,lengthCm:0,widthCm:0,heightCm:0}).success,true);
+console.log('13 shipping workflow guards passed; database, carrier and SMTP mocked.');
 })().catch(e=>{console.error(e);process.exitCode=1});

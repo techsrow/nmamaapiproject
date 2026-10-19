@@ -15,6 +15,7 @@ export async function bookShadowfax(input:{orderId:number;pickupLocationId?:numb
  if(obj(cfg.config.publicConfig).enableBooking!==true)throw new Error('Enable Shadowfax booking only after staging carrier verification (publicConfig.enableBooking).');
  const prepared=await prisma.$transaction(async tx=>{
   await tx.$queryRaw`SELECT id FROM "Order" WHERE id=${input.orderId} FOR UPDATE`;
+if(await tx.storeSetting.findUnique({where:{key:`delhivery-booking:${input.orderId}`}}))throw Error("Reconcile existing Delhivery booking first.");
   if(await tx.storeSetting.findUnique({where:{key:`shiprocket-booking:${input.orderId}`}}))throw Error("Reconcile existing Shiprocket booking first.");
   const existing=await tx.storeSetting.findUnique({where:{key:key(input.orderId)}}),saved=obj(existing?.value);
   if(saved.shipmentId){

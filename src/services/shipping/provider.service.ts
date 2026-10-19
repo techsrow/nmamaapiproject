@@ -30,6 +30,7 @@ export const SHIPPING_CATALOG = [
     name: "Delhivery",
     kind: "DIRECT",
     fields: ["token", "clientName"],
+    capabilities: { automaticBooking: true, labels: true, tracking: true },
   },
   {
     provider: "BlueDart",
@@ -296,6 +297,7 @@ export async function testProvider(
       );
     }
 
+    if(provider === "Delhivery"){const {testDelhivery}=await import("./delhivery.service");const result=await testDelhivery();return await record(provider,result.ok,result.message);}
     if (provider === "Shadowfax360") {
       const { testShadowfax } = await import("./shadowfax.service");
       const result = await testShadowfax();

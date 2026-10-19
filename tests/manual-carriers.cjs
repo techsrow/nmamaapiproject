@@ -6,12 +6,12 @@ const db={shippingProviderConfig:{findUnique:async()=>({isEnabled:enabled})},sto
 const id=require.resolve('../dist/lib/prisma');require.cache[id]={id,filename:id,loaded:true,exports:{prisma:db}};
 const svc=require('../dist/services/shipping/shipping.service');
 (async()=>{
- const input={orderId:1,provider:'Delhivery',awb:'DL12345',items:[{orderItemId:10,quantity:1}]};
+ const input={orderId:1,provider:'BlueDart',awb:'DL12345',items:[{orderItemId:10,quantity:1}]};
  enabled=false;await assert.rejects(svc.createShipment(input),/disabled/);enabled=true;
  intent={};await assert.rejects(svc.createShipment(input),/Reconcile/);intent=null;
  await assert.rejects(svc.createShipment({...input,awb:''}),/actual carrier AWB/);
  await assert.rejects(svc.createShipment({...input,trackingUrl:'javascript:alert(1)'}),/HTTPS/);
- const s=await svc.createShipment({...input,trackingUrl:'https://example.com/track/DL12345'});assert.equal(s.provider,'Delhivery');assert.equal(s.awb,'DL12345');assert.equal(s.providerMeta.bookingMode,'MANUAL');assert.equal(s.shippingCost,null);
+ const s=await svc.createShipment({...input,trackingUrl:'https://example.com/track/DL12345'});assert.equal(s.provider,'BlueDart');assert.equal(s.awb,'DL12345');assert.equal(s.providerMeta.bookingMode,'MANUAL');assert.equal(s.shippingCost,null);
  await assert.rejects(svc.schedulePickup(50),/carrier portal/);
  await assert.rejects(svc.generateLabel(50),/carrier portal/);
  await assert.rejects(svc.cancelShipment(50),/carrier portal/);
